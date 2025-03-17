@@ -95,6 +95,5 @@ Take a screenshot of the current page. Args: session_id: Session ID of the brows
 From server: mcp_browser_use
 ```
 
+[![Quick demo](https://img.youtube.com/vi/20B8trurlsI/maxresdefault.jpg)](https://www.youtube.com/20B8trurlsI)
 
-
-<iframe width="560" height="315" src="https://www.youtube.com/embed/20B8trurlsI?si=8_oK2dKbMG3a2Igt" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>

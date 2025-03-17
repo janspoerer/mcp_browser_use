@@ -1,9 +1,10 @@
 
 # MCP Browser Use
 
-![](docs/mcp_browser_use_logo.jpg)
+<img src="docs/mcp_browser_use_logo.jpg" alt="Description" width="300">
 
----
+
+
 
 ## What You Can Achieve With This MCP
 

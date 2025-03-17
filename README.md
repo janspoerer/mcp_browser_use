@@ -95,5 +95,4 @@ Take a screenshot of the current page. Args: session_id: Session ID of the brows
 From server: mcp_browser_use
 ```
 
-[![Quick demo](https://img.youtube.com/vi/20B8trurlsI/maxresdefault.jpg)](https://www.youtube.com/20B8trurlsI)
-
+[![Quick demo](https://img.youtube.com/vi/20B8trurlsI/hqdefault.jpg)](https://www.youtube.com/watch?v=20B8trurlsI)

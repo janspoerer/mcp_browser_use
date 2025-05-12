@@ -1,6 +1,7 @@
 annotated-types==0.7.0
 anyio==4.9.0
 attrs==25.3.0
+pip install beautifulsoup4
 certifi==2025.1.31
 click==8.1.8
 h11==0.14.0

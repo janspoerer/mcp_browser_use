@@ -1,68 +1,257 @@
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import WebDriverException, ElementNotInteractableException, TimeoutException, StaleElementReferenceException
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import os
+import sys
 import time
 import uuid
 
+import psutil
+import shutil
+import random
+import logging
+import tempfile
+import platform
+import traceback
+import subprocess
+
+
+import selenium
+from pathlib import Path
+from bs4 import BeautifulSoup
+from selenium import webdriver
+
+from selenium import webdriver
 from mcp.server.fastmcp import FastMCP
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    ElementNotInteractableException,
+    TimeoutException,
+    StaleElementReferenceException,
+    SessionNotCreatedException,
+    WebDriverException,
+)
+
+# --- Logging Configuration ---
+# Current working directory
+
+LOG_FILE = Path(os.getcwd()) / "selenium_mcp_log.log"
+# Touch a new file
+if not LOG_FILE.exists():
+    LOG_FILE.touch()
+
+# Configure logging
+# Use force=Trlue to reconfigure if it was already set up (e.g., by imported libs)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        # logging.StreamHandler(sys.stdout)
+    ],
+    force=True # Use force=True with Python 3.8+ to override existing handlers
+)
 
 # Initialize FastMCP server
 mcp = FastMCP("selenium")
 
 # Store browser sessions
 browser_sessions = {}
+browser_temp_dirs = {}
+browser_log_paths = {}
+
+def remove_unwanted_tags(html_content):
+    """Remove specific tags (<script>, <style>, <meta>, <link>, <noscript>) from HTML."""
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    # Remove specified tags
+    for tag in soup.find_all(['script', 'style', 'meta', 'link', 'noscript']):
+        tag.extract()
+
+    # Getting the text and stripping whitespace.
+    return ' '.join(str(soup).split())
+
+def get_cleaned_html(driver):
+    """Get cleaned HTML content without script tags."""
+    html_content = driver.page_source
+
+    # Remove script tags
+    cleaned_html = remove_unwanted_tags(html_content)
+    # Optionally, you can also remove other unwanted tags or attributes here
+    return cleaned_html
+
+def cleanup_old_temp_dirs():
+    """Clean up old temporary directories that might have been left behind."""
+    temp_root = tempfile.gettempdir()
+    current_time = time.time()
+    max_age = 24 * 3600  # 24 hours in seconds
+
+    for item in os.listdir(temp_root):
+        if item.startswith("selenium_profile_"):
+            item_path = os.path.join(temp_root, item)
+            try:
+                if os.path.isdir(item_path):
+                    stat = os.stat(item_path)
+                    if current_time - stat.st_mtime > max_age:
+                        shutil.rmtree(item_path, ignore_errors=True)
+                        logging.info(f"Cleaned up old temp directory: {item_path}")
+            except Exception as e:
+                logging.warning(f"Failed to check/clean temp dir {item_path}: {e}")
+
+
+
+def kill_chrome_processes():
+    """Kill any existing Chrome and ChromeDriver processes"""
+    for proc in psutil.process_iter(['name']):
+        try:
+            # Check for both Chrome and ChromeDriver processes
+            if proc.info['name'] in ['chrome', 'chromedriver', 'Google Chrome']:
+                proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    time.sleep(2)  # Give processes time to fully terminate
+
+def cleanup_chrome_tmp_files():
+    """Clean up Chrome temporary files and directories"""
+    tmp_dir = tempfile.gettempdir()
+    patterns = ['selenium_profile_*', 'chromedriver_*']
+
+    for pattern in patterns:
+        for item in Path(tmp_dir).glob(pattern):
+            try:
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+            except Exception as e:
+                logging.warning(f"Failed to remove {item}: {e}")
 
 @mcp.tool()
-async def start_browser(headless: bool = False) -> str:
-    """Start a new browser session. Will not be headless unless explicitly specified by the user.
-    
-    Args:
-        headless: Whether to run the browser in headless mode
+async def start_browser(
+    headless: bool = False,
+    is_persistent_browser_session: bool = False
+) -> str:
+    """
+    Start Chrome with WSL2-specific configurations and without user-data-dir
+    """
+    session_id = str(uuid.uuid4())
+    chrome_options = Options()
+
+    # Basic options without user-data-dir
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-popup-blocking")
+
+    # WSL2-specific options
+    chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--no-zygote")
+    chrome_options.add_argument("--no-first-run")
+
+    # Use temporary preferences instead of user-data-dir
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_experimental_option("prefs", {
+        "profile.default_content_settings.popups": 0,
+        "download.default_directory": "/tmp",
+        "download.prompt_for_download": False
+    })
+
+    if headless:
+        chrome_options.add_argument("--headless=new")
+
+    # Create a unique log path
+    log_path = os.path.join(tempfile.gettempdir(), f"chromedriver_{session_id}.log")
+    service = ChromeService(log_path=log_path)
+
+    try:
+        # Add a retry mechanism
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+                browser_sessions[session_id] = driver
+                return f"Browser session created successfully. Session ID: {session_id}"
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logging.warning(f"Attempt {attempt + 1} failed, retrying in 2 seconds...")
+                    time.sleep(2)
+                else:
+                    raise
+    except Exception as exc:
+        error_msg = (
+            f"=== CHROME LAUNCH ERROR ===\n"
+            f"Session ID: {session_id}\n"
+            f"OS: {platform.system()} {platform.release()}\n"
+            f"Python: {sys.version.split()[0]}\n"
+            f"Selenium: {selenium.__version__}\n"
+            f"Error Type: {type(exc).__name__}\n"
+            f"Error Msg: {str(exc)}\n"
+            f"Traceback:\n{traceback.format_exc()}"
+        )
+        logging.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def get_browser_versions() -> str:
+    """
+    Return the installed Chrome and Chromedriver versions to verify compatibility.
     """
     try:
-        chrome_options = Options()
-        if headless:
-            chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        
-        driver = webdriver.Chrome(options=chrome_options)
-        session_id = str(uuid.uuid4())
-        browser_sessions[session_id] = driver
-        
-        return f"Browser session created successfully. Session ID: {session_id}"
+        # Get Chrome version
+        chrome_version = (
+            subprocess.check_output(["google-chrome", "--version"], stderr=subprocess.STDOUT)
+            .decode()
+            .strip()
+        )
     except Exception as e:
-        return f"Error starting browser: {str(e)}"
+        chrome_version = f"Error fetching Chrome version: {e}"
+
+    try:
+        # Get Chromedriver version
+        driver = webdriver.Chrome()  # temporary driver just to query version
+        chromedriver_version = driver.capabilities.get("browserVersion") or "<unknown>"
+        driver.quit()
+    except Exception as e:
+        chromedriver_version = f"Error fetching Chromedriver version via Selenium: {e}"
+
+    return f"{chrome_version}\nChromedriver (Selenium): {chromedriver_version}"
+
+
 
 @mcp.tool()
 async def navigate(session_id: str, url: str) -> str:
     """Navigate to a URL.
-    
+
     Args:
         session_id: Session ID of the browser
         url: URL to navigate to
     """
     if session_id not in browser_sessions:
         return f"Session {session_id} not found. Please start a new browser session."
-    
+
     driver = browser_sessions[session_id]
-    
+
     try:
         driver.get(url)
         time.sleep(2)  # Allow page to load
-        
-        return f"Navigated to {url}\nTitle: {driver.title}\nHTML: {driver.page_source}"
+
+        clean_html = get_cleaned_html(driver)
+
+        return f"Navigated to {url}\nTitle: {driver.title}\nHTML: {clean_html}"
     except Exception as e:
-        return f"Error navigating to {url}: {str(e)}"
+        return f"Error navigating to {url}: {traceback.format_exc()}"
 
 @mcp.tool()
 async def click_element(session_id: str, selector: str, selector_type: str = "css", timeout: int = 10, force_js: bool = False) -> str:
     """Click an element on the page.
-    
+
     Args:
         session_id: Session ID of the browser
         selector: CSS selector, XPath, or ID of the element to click
@@ -72,29 +261,29 @@ async def click_element(session_id: str, selector: str, selector_type: str = "cs
     """
     if session_id not in browser_sessions:
         return f"Session {session_id} not found. Please start a new browser session."
-    
+
     driver = browser_sessions[session_id]
-    
+
     try:
         # Get the appropriate By selector
         by_selector = get_by_selector(selector_type)
-        
+
         # Wait for the element to be clickable
         wait = WebDriverWait(driver, timeout)
-        
+
         if by_selector:
             element = wait.until(
                 EC.element_to_be_clickable((by_selector, selector))
             )
         else:
             return f"Invalid selector type: {selector_type}"
-            
+
         # Scroll element into view
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-        
+
         # Small delay after scrolling
         time.sleep(0.5)
-        
+
         try:
             # Try a regular click first (unless force_js is True)
             if not force_js:
@@ -106,16 +295,16 @@ async def click_element(session_id: str, selector: str, selector_type: str = "cs
             try:
                 driver.execute_script("arguments[0].click();", element)
             except Exception as js_err:
-                return f"Both native and JavaScript clicks failed. Error: {str(js_err)}"
-        
+                return f"Both native and JavaScript clicks failed. Error: {traceback.format_exc()}"
+
         # Allow time for click action to complete
         time.sleep(1)
-        
+
         return f"Clicked element matching '{selector}'\nCurrent URL: {driver.current_url}\nTitle: {driver.title}"
     except TimeoutException:
-        return f"Timeout waiting for element matching '{selector}' to be clickable"
+        return f"Timeout waiting for element matching '{selector}' to be clickable."
     except Exception as e:
-        return f"Error clicking element: {str(e)}"
+        return f"Error clicking element: {str(e)}, traceback: {traceback.format_exc()}"
 
 def get_by_selector(selector_type):
     """Helper function to get the appropriate By selector"""
@@ -132,9 +321,32 @@ def get_by_selector(selector_type):
     return selectors.get(selector_type.lower())
 
 @mcp.tool()
+async def read_chromedriver_log(session_id: str, lines: int = 50) -> str:
+    """
+    Fetch the first N lines of the Chromedriver log for debugging.
+
+    Args:
+        session_id (str): Browser session ID.
+        lines (int): Number of lines to return from the top of the log.
+    """
+    log_path = browser_log_paths.get(session_id)
+    if not log_path or not os.path.exists(log_path):
+        return f"No log found for session {session_id}. Expected at: {log_path}"
+
+    output = []
+    with open(log_path, "r", errors="ignore") as f:
+        for _ in range(lines):
+            line = f.readline()
+            if not line:
+                break
+            output.append(line.rstrip("\n"))
+    return "\n".join(output) or f"Log for session {session_id} is empty."
+
+
+@mcp.tool()
 async def fill_text(session_id: str, selector: str, text: str, selector_type: str = "css", clear_first: bool = True, timeout: int = 10) -> str:
     """Input text into an element.
-    
+
     Args:
         session_id: Session ID of the browser
         selector: CSS selector, XPath, or ID of the input field
@@ -145,21 +357,21 @@ async def fill_text(session_id: str, selector: str, text: str, selector_type: st
     """
     if session_id not in browser_sessions:
         return f"Session {session_id} not found. Please start a new browser session."
-    
+
     driver = browser_sessions[session_id]
-    
+
     try:
         by_selector = get_by_selector(selector_type)
         wait = WebDriverWait(driver, timeout)
-        
+
         element = wait.until(
             EC.element_to_be_clickable((by_selector, selector))
         )
-        
+
         # Scroll element into view
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
         time.sleep(0.5)
-        
+
         if clear_first:
             # Clear using multiple methods to be thorough
             element.click()  # Focus the element
@@ -167,26 +379,26 @@ async def fill_text(session_id: str, selector: str, text: str, selector_type: st
             # For stubborn fields, use CTRL+A and Delete
             element.send_keys(Keys.CONTROL + "a")
             element.send_keys(Keys.DELETE)
-            
+
         # Type the text character by character with a small delay
         # This can help with elements that have event listeners that depend on typing
         for char in text:
             element.send_keys(char)
             time.sleep(0.01)  # Small delay between characters
-        
+
         # Trigger change event to ensure field updates properly
         driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", element)
-        
+
         return f"Entered text '{text}' into element matching '{selector}'\nCurrent URL: {driver.current_url}\nTitle: {driver.title}"
     except TimeoutException:
         return f"Timeout waiting for element matching '{selector}' to be clickable"
     except Exception as e:
-        return f"Error entering text: {str(e)}"
+        return f"Error entering text: {traceback.format_exc()}"
 
 @mcp.tool()
 async def send_keys(session_id: str, key: str, selector: str = None, selector_type: str = "css") -> str:
     """Send keyboard keys to the browser.
-    
+
     Args:
         session_id: Session ID of the browser
         key: Key to send (e.g., ENTER, TAB, etc.)
@@ -195,31 +407,33 @@ async def send_keys(session_id: str, key: str, selector: str = None, selector_ty
     """
     if session_id not in browser_sessions:
         return f"Session {session_id} not found. Please start a new browser session."
-    
+
     driver = browser_sessions[session_id]
-    
+
     try:
         key_to_send = getattr(Keys, key.upper(), None)
         if key_to_send is None:
             return f"Invalid key: {key}"
-        
+
         if selector:
             element = find_element(driver, selector, selector_type)
             element.send_keys(key_to_send)
         else:
             # Send to active element if no selector provided
             webdriver.ActionChains(driver).send_keys(key_to_send).perform()
-        
+
         time.sleep(1)  # Allow time for action to complete
-        
-        return f"Sent key '{key}' to {'element matching ' + selector if selector else 'active element'}\nCurrent URL: {driver.current_url}\nTitle: {driver.title}\nHTML: {driver.page_source}"
+
+        clean_html = get_cleaned_html(driver)
+
+        return f"Sent key '{key}' to {'element matching ' + selector if selector else 'active element'}\nCurrent URL: {driver.current_url}\nTitle: {driver.title}\nHTML: {clean_html}"
     except Exception as e:
-        return f"Error sending key: {str(e)}"
+        return f"Error sending key: {traceback.format_exc()}"
 
 @mcp.tool()
 async def scroll(session_id: str, x: int = 0, y: int = 500) -> str:
     """Scroll the page.
-    
+
     Args:
         session_id: Session ID of the browser
         x: Horizontal scroll amount in pixels
@@ -227,15 +441,18 @@ async def scroll(session_id: str, x: int = 0, y: int = 500) -> str:
     """
     if session_id not in browser_sessions:
         return f"Session {session_id} not found. Please start a new browser session."
-    
+
     driver = browser_sessions[session_id]
-    
+
     try:
         driver.execute_script(f"window.scrollBy({x}, {y});")
-        
-        return f"Scrolled by x={x}, y={y}\nCurrent URL: {driver.current_url}\nTitle: {driver.title}\nHTML: {driver.page_source}"
+
+        time.sleep(1)  # Allow time for scroll action to complete
+        clean_html = get_cleaned_html(driver)
+
+        return f"Scrolled by x={x}, y={y}\nCurrent URL: {driver.current_url}\nTitle: {driver.title}\nHTML: {clean_html}"
     except Exception as e:
-        return f"Error scrolling: {str(e)}"
+        return f"Error scrolling: {traceback.format_exc()}"
 
 @mcp.tool()
 async def take_screenshot(
@@ -243,16 +460,16 @@ async def take_screenshot(
         screenshot_path: str = None,
     ) -> str:
     """Take a screenshot of the current page.
-    
+
     Args:
         session_id: Session ID of the browser
     """
     if session_id not in browser_sessions:
         return f"Session {session_id} not found. Please start a new browser session."
-    
+
 
     driver = browser_sessions[session_id]
-    
+
     try:
         screenshot = driver.get_screenshot_as_base64()
 
@@ -260,39 +477,53 @@ async def take_screenshot(
         if screenshot_path:
             with open(screenshot_path, "wb") as f:
                 f.write(driver.get_screenshot_as_png())
-        
+
+        # Truncate to maximum 10 characters
+        try:
+            screenshot = screenshot[:10] + "..."
+        except Exception as e:
+            screenshot = "Error truncating screenshot: " + str(e)
+
         return f"Screenshot taken successfully. Base64 data: {screenshot}"
     except Exception as e:
-        return f"Error taking screenshot: {str(e)}"
+        return f"Error taking screenshot: {traceback.format_exc()}"
 
 @mcp.tool()
 async def close_browser(session_id: str) -> str:
     """Close a browser session.
-    
+
     Args:
         session_id: Session ID of the browser to close
     """
     if session_id not in browser_sessions:
         return f"Session {session_id} not found."
-    
+
     try:
         driver = browser_sessions[session_id]
         driver.quit()
+
+        # Clean up the temporary user data directory
+        if session_id in browser_temp_dirs:
+            user_data_dir = browser_temp_dirs[session_id]
+            if os.path.exists(user_data_dir):
+                shutil.rmtree(user_data_dir)
+                del browser_temp_dirs[session_id]
+
         del browser_sessions[session_id]
-        
+
         return f"Session {session_id} closed successfully"
     except Exception as e:
-        return f"Error closing session: {str(e)}"
+        return f"Error closing session: {traceback.format_exc()}"
 
 def find_element(driver, selector, selector_type, timeout=10, visible_only=False):
     """Helper function to find an element based on selector type with waiting"""
     by_selector = get_by_selector(selector_type)
-    
+
     if not by_selector:
         raise ValueError(f"Unsupported selector type: {selector_type}")
-    
+
     wait = WebDriverWait(driver, timeout)
-    
+
     if visible_only:
         return wait.until(
             EC.visibility_of_element_located((by_selector, selector))
@@ -305,7 +536,7 @@ def find_element(driver, selector, selector_type, timeout=10, visible_only=False
 @mcp.tool()
 async def wait_for_element(session_id: str, selector: str, selector_type: str = "css", timeout: int = 10, condition: str = "visible") -> str:
     """Wait for an element to be present, visible, or clickable.
-    
+
     Args:
         session_id: Session ID of the browser
         selector: CSS selector, XPath, or ID of the element
@@ -315,13 +546,13 @@ async def wait_for_element(session_id: str, selector: str, selector_type: str = 
     """
     if session_id not in browser_sessions:
         return f"Session {session_id} not found. Please start a new browser session."
-    
+
     driver = browser_sessions[session_id]
-    
+
     try:
         by_selector = get_by_selector(selector_type)
         wait = WebDriverWait(driver, timeout)
-        
+
         if condition == "present":
             element = wait.until(EC.presence_of_element_located((by_selector, selector)))
         elif condition == "visible":
@@ -330,17 +561,17 @@ async def wait_for_element(session_id: str, selector: str, selector_type: str = 
             element = wait.until(EC.element_to_be_clickable((by_selector, selector)))
         else:
             return f"Invalid condition: {condition}. Use 'present', 'visible', or 'clickable'."
-            
+
         return f"Element matching '{selector}' is now {condition}"
     except TimeoutException:
         return f"Timeout waiting for element matching '{selector}' to be {condition}"
     except Exception as e:
-        return f"Error waiting for element: {str(e)}"
+        return f"Error waiting for element: {traceback.format_exc()}"
 
 @mcp.tool()
 async def debug_element(session_id: str, selector: str, selector_type: str = "css") -> str:
     """Debug why an element might not be clickable or visible.
-    
+
     Args:
         session_id: Session ID of the browser
         selector: CSS selector, XPath, or ID of the element
@@ -348,28 +579,28 @@ async def debug_element(session_id: str, selector: str, selector_type: str = "cs
     """
     if session_id not in browser_sessions:
         return f"Session {session_id} not found. Please start a new browser session."
-    
+
     driver = browser_sessions[session_id]
-    
+
     try:
         by_selector = get_by_selector(selector_type)
-        
+
         # First check if element exists
         try:
             element = driver.find_element(by_selector, selector)
         except Exception as e:
-            return f"Element not found: {str(e)}"
-            
+            return f"Element not found: {traceback.format_exc()}"
+
         # Get element properties
         is_displayed = element.is_displayed()
         is_enabled = element.is_enabled()
         tag_name = element.tag_name
-        
+
         # Get CSS properties that might affect visibility
         css_properties = {}
         for prop in ['display', 'visibility', 'opacity', 'height', 'width', 'position', 'z-index']:
             css_properties[prop] = driver.execute_script(f"return window.getComputedStyle(arguments[0]).getPropertyValue('{prop}')", element)
-            
+
         # Check if element is in viewport
         in_viewport = driver.execute_script("""
             var elem = arguments[0];
@@ -381,7 +612,7 @@ async def debug_element(session_id: str, selector: str, selector_type: str = "cs
                 rect.right <= (window.innerWidth || document.documentElement.clientWidth)
             );
         """, element)
-        
+
         # Check for overlapping elements
         is_covered = driver.execute_script("""
             var elem = arguments[0];
@@ -391,7 +622,7 @@ async def debug_element(session_id: str, selector: str, selector_type: str = "cs
             var element = document.elementFromPoint(centerX, centerY);
             return element !== elem;
         """, element)
-        
+
         return f"""Debug info for element matching '{selector}':
 - Tag name: {tag_name}
 - Displayed: {is_displayed}
@@ -401,10 +632,10 @@ async def debug_element(session_id: str, selector: str, selector_type: str = "cs
 - CSS properties: {css_properties}
 """
     except Exception as e:
-        return f"Error debugging element: {str(e)}"
+        return f"Error debugging element: {traceback.format_exc()}"
 
 
 if __name__ == "__main__":
     # Initialize and run the server with stdio transport
-    print("Starting Selenium MCP server...", flush=True)
+    # logging.debug("Starting Selenium MCP server...")
     mcp.run(transport='stdio')

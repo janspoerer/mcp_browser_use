@@ -1,5 +1,8 @@
 summarizer.ipynb
 fastagent.secrets.yaml
+summary_with_header.txt
+summary.txt
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

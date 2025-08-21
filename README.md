@@ -1,6 +1,8 @@
 
 # MCP Browser Use
 
+[![Verified on MseeP](https://mseep.ai/badge.svg)](https://mseep.ai/app/9e05b912-08dc-41f5-b7fa-1087315883d5)
+
 <img src="docs/mcp_browser_use_logo.jpg" alt="Description" width="300">
 
 

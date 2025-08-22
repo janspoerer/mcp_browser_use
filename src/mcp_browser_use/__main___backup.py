@@ -317,8 +317,7 @@ async def navigate(session_id: str, url: str) -> str:
         return f"Navigated to {url}\nTitle: {driver.title}\nHTML: {clean_html}"
     except Exception as e:
         return f"Error navigating to {url}: {traceback.format_exc()}"
-        logger.info(f"Navigated to {url}. Title: {driver.title}")
-        return f"Navigated to {url}\nTitle: {driver.title}\nHTML: {driver.page_source}"
+
 
 
 def find_element(driver, selector, selector_type, timeout=10, visible_only=False, iframe_selector=None, iframe_selector_type="css", shadow_root_selector = None, shadow_root_selector_type="css"):

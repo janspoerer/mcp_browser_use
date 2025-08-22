@@ -101,3 +101,11 @@ From server: mcp_browser_use
 ## Demo Video (YouTube)
 
 [![Quick demo](https://img.youtube.com/vi/20B8trurlsI/hqdefault.jpg)](https://www.youtube.com/watch?v=20B8trurlsI)
+
+## Run Tests
+
+We DO NOT want to use pytest-asyncio.
+
+```
+pip install -e ".[test]"`
+```

@@ -14,7 +14,17 @@
 
 This project aims to empower AI agents to perform web use, browser automation, scraping, and automation with Model Context Protocol (MCP) and Selenium.
 
+The special feature of this MCP is that it can handle multiple agents accessing multiple browser **windows**. One does not need to start multiple Docker images, VMs, or computers to have multiple scraping agents. And one can still use **one single browser profile** across all agents. Each agent will have its own windows, and they will not interfere with each other.
+
+_This makes the handling of multiple agents seamless: Just start as many agents as you want, and it will just work!_ Use two Claude Code instances, one Codex CLI instance, one Gemini CLI instance and a `fast-agent` instance -- all on one computer, all using the same browser profile, and all working (somewhat) in parallel.
+
 > Our mission is to let AI agents complete any web task with minimal human supervision -- all based on natural language instructions.
+
+## Feature Highlights
+
+* **HTML Truncation:** The MCP allows you to configure truncation of the HTML pages. Other scraping MCPs may overwhelm the AI with accessibility snapshots or HTML dumps that are larger than the context window. This MCP will help you to manage the maximum page size by setting the `MCP_MAX_SNAPSHOT_CHARS` environment variable.
+* **Multiple Browser Windows and Multiple Agents:** You can connect multiple agents to this MCP independently, without requiring coordination on behalf of the agents. Each agent can work with **the same** browser profile, which is helpful when logins should persist across agents. Each agent gets their own browser window, so they do not interfere with each other. Uses Chrome DevTools Protocol TargetId to identify browser windows.
+
 
 ## How to Use This MCP
 
@@ -49,53 +59,18 @@ Restart Claude to see if the JSON config is valid. Claude will lead to you the e
 
 If the setup was successful, you will see a small hammer icon in the bottom-right of the "New Chat" window in Claude. Next to the hammer will be the number of functions that the MCP provides.
 
-Click to hammer to see something like this:
+Click the hammer to see the available tools.
+
+## `.env` Variables
 
 ```
-Available MCP Tools
-
-Claude can use tools provided by specialized servers using Model Context Protocol. Learn more about MCP.
-
-click_element
-Click an element on the page. Args: session_id: Session ID of the browser selector: CSS selector, XPath, or ID of the element to click selector_type: Type of selector (css, xpath, id)
-
-From server: mcp_browser_use
-
-close_browser
-Close a browser session. Args: session_id: Session ID of the browser to close
-
-From server: mcp_browser_use
-
-fill_text
-Input text into an element. Args: session_id: Session ID of the browser selector: CSS selector, XPath, or ID of the input field text: Text to enter into the field selector_type: Type of selector (css, xpath, id) clear_first: Whether to clear the field before entering text
-
-From server: mcp_browser_use
-
-navigate
-Navigate to a URL. Args: session_id: Session ID of the browser url: URL to navigate to
-
-From server: mcp_browser_use
-
-scroll
-Scroll the page. Args: session_id: Session ID of the browser x: Horizontal scroll amount in pixels y: Vertical scroll amount in pixels
-
-From server: mcp_browser_use
-
-send_keys
-Send keyboard keys to the browser. Args: session_id: Session ID of the browser key: Key to send (e.g., ENTER, TAB, etc.) selector: CSS selector, XPath, or ID of the element to send keys to (optional) selector_type: Type of selector (css, xpath, id)
-
-From server: mcp_browser_use
-
-start_browser
-Start a new browser session. Args: headless: Whether to run the browser in headless mode
-
-From server: mcp_browser_use
-
-take_screenshot
-Take a screenshot of the current page. Args: session_id: Session ID of the browser
-
-From server: mcp_browser_use
+CHROME_PROFILE_NAME=Selenium
+CHROME_EXECUTABLE_PATH= # Path to the Chrome executable.
+CHROME_PROFILE_USER_DATA_DIR= # Path to the Chrome user data directory.
+MAX_SNAPSHOT_CHARS=10000
 ```
+
+## Available Tools
 
 
 ## Demo Video (YouTube)

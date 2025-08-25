@@ -2,7 +2,12 @@ summarizer.ipynb
 fastagent.secrets.yaml
 summary_with_header.txt
 summary.txt
-
+_OLD/
+*.ipynb
+.codex/
+.claude/
+.gemini/
+*.jsonl
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

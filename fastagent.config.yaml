@@ -34,15 +34,8 @@ logger:
 mcp:
     servers:
         mcp_browser_use:
-            command: "/home/janspoerer/code/all_repos/mcp_browser_use/.venv/bin/python"
-            args: ["/home/janspoerer/code/all_repos/mcp_browser_use/mcp_browser_use"]
-        fetch:
-            command: "uvx"
-            args: ["mcp-server-fetch"]
-        filesystem:
-            command: "npx"
-            args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
-
-        mcp_helper_library:
-            command: "/home/janspoerer/code/all_repos/helper_library/.venv/bin/python"
-            args: ["/home/janspoerer/code/all_repos/helper_library/helper_library_mcp_server.py"]
+            command: "/.venv/bin/python"
+            args: [
+                "-m",
+                "mcp_browser_use"
+            ]

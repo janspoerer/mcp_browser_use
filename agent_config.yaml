@@ -1,0 +1,12 @@
+
+default_model: gpt-4o-mini
+
+logger:
+    progress_display: false
+    show_chat: false
+
+mcp:
+    servers:
+        mcp_browser_use:
+            command: "c:\\Users\\j.spoerer\\code\\scraping\\mcp_browser_use\\.venv\\Scripts\\python.exe"
+            args: ["-m", "mcp_browser_use"]

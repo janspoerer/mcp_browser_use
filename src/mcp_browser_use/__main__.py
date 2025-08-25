@@ -184,6 +184,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 # Import from your package __init__.py
 from mcp_browser_use.helpers import (
+    ACTION_LOCK_TTL_SECS,
+
     INTRA_PROCESS_LOCK,
     DRIVER,
     DEBUGGER_HOST,
@@ -237,7 +239,7 @@ async def start_browser() -> str:
                 # Expose the process tag so clients can correlate logs/locks if they want
                 "session_id": owner,
                 "debugger": f"{DEBUGGER_HOST}:{DEBUGGER_PORT}",
-                "lock_ttl_seconds": int(os.getenv("MCP_ACTION_LOCK_TTL", "10")),
+                "lock_ttl_seconds": ACTION_LOCK_TTL_SECS,
                 "snapshot": snapshot,
             })
         except Exception as e:
@@ -247,7 +249,6 @@ async def start_browser() -> str:
         finally:
             if had_lock:
                 _renew_action_lock(owner)
-
 @mcp.tool()
 async def navigate(url: str, timeout: float = 30.0) -> str:
     async with INTRA_PROCESS_LOCK:

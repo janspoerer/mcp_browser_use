@@ -65,9 +65,10 @@ Click the hammer to see the available tools.
 
 ```
 CHROME_PROFILE_NAME=Selenium
-CHROME_EXECUTABLE_PATH= # Path to the Chrome executable.
-CHROME_PROFILE_USER_DATA_DIR= # Path to the Chrome user data directory.
-MAX_SNAPSHOT_CHARS=10000
+CHROME_EXECUTABLE_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+CHROME_PROFILE_USER_DATA_DIR=/Users/janspoerer/Library/Application Support/Google/Chrome
+CHROME_PROFILE_NAME=Profile 15
+MCP_MAX_SNAPSHOT_CHARS=10000
 ```
 
 ## Available Tools

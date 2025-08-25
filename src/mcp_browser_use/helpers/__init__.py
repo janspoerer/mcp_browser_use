@@ -116,7 +116,7 @@ MY_TAG: Optional[str] = None
 TARGET_ID: Optional[str] = None
 WINDOW_ID: Optional[int] = None
 
-LOCK_DIR = os.getenv("MCP_BROWSER_LOCK_DIR") or str(Path(get_env_config().get("state_dir") or tempfile.gettempdir()) / "mcp_chrome_locks")
+LOCK_DIR = os.getenv("MCP_BROWSER_LOCK_DIR") or str(Path(tempfile.gettempdir()) / "mcp_chrome_locks")
 Path(LOCK_DIR).mkdir(parents=True, exist_ok=True)
 
 # Action lock TTL (post-action exclusivity) and wait time
@@ -271,10 +271,6 @@ def ensure_process_tag() -> str:
     return MY_TAG
 
 def _ensure_singleton_window(driver: webdriver.Chrome):
-    """
-    Ensure this process has a single dedicated OS window backed by a CDP target.
-    Sets/uses TARGET_ID and WINDOW_ID.
-    """
     global TARGET_ID, WINDOW_ID
 
     if TARGET_ID:
@@ -283,13 +279,22 @@ def _ensure_singleton_window(driver: webdriver.Chrome):
             driver.switch_to.window(h)
             return
 
-    # Create a real OS window first
+    # Try to create a real OS window; if no targetId is returned, create one explicitly.
     try:
         win = driver.execute_cdp_cmd("Browser.createWindow", {"state": "normal"})
         WINDOW_ID = win.get("windowId")
         TARGET_ID = win.get("targetId")
+        if not TARGET_ID:
+            t = driver.execute_cdp_cmd("Target.createTarget", {"url": "about:blank", "newWindow": True})
+            TARGET_ID = t["targetId"]
+            if not WINDOW_ID:
+                try:
+                    w = driver.execute_cdp_cmd("Browser.getWindowForTarget", {"targetId": TARGET_ID})
+                    WINDOW_ID = w.get("windowId")
+                except Exception:
+                    WINDOW_ID = None
     except Exception:
-        # Fallback to Target API newWindow
+        # Fallback to Target API directly
         t = driver.execute_cdp_cmd("Target.createTarget", {"url": "about:blank", "newWindow": True})
         TARGET_ID = t["targetId"]
         try:
@@ -335,28 +340,33 @@ def close_singleton_window() -> bool:
     WINDOW_ID = None
     return closed
 
-def _handle_for_target(driver, target_id: str) -> Optional[str]:
-    # Fast path: Selenium Chromium convention
+def _handle_for_target(driver, target_id: Optional[str]) -> Optional[str]:
+    if not target_id:
+        return None
+    # Fast path
     for h in driver.window_handles:
         if h.endswith(target_id):
             return h
-    # Robust path: switch through handles and ask CDP for current target
+    # Robust path
     current = driver.current_window_handle if driver.window_handles else None
     try:
         for h in driver.window_handles:
             driver.switch_to.window(h)
-            info = driver.execute_cdp_cmd("Target.getTargetInfo", {})  # works in recent CDP
+            info = driver.execute_cdp_cmd("Target.getTargetInfo", {})
             tid = info.get("targetInfo", {}).get("targetId") or info.get("targetId")
             if tid == target_id:
                 return h
     finally:
         if current and current in driver.window_handles:
             driver.switch_to.window(current)
-    # Try activation as last resort
-    driver.execute_cdp_cmd("Target.activateTarget", {"targetId": target_id})
-    for h in driver.window_handles:
-        if h.endswith(target_id):
-            return h
+    # Last resort
+    try:
+        driver.execute_cdp_cmd("Target.activateTarget", {"targetId": target_id})
+        for h in driver.window_handles:
+            if h.endswith(target_id):
+                return h
+    except Exception:
+        pass
     return None
 
 def _ensure_session_window(driver, session):

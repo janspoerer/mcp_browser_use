@@ -1,4 +1,47 @@
-# mcp_browser_use/__init__.py
+"""
+## How Multiple Agents are Handled
+
+We do not manage multiple sessions in one MCP connection. 
+
+Each agent will have their own MCP connection.
+
+While each agent will connect to this very same mcp_browser_use code, 
+they will still connect independently. They can start and stop their MCP server
+connections at will without affecting the functioning of the browser. The 
+agents are agnostic to whether other agents are currently running.
+The MCP for browser use that we develop here should abstract the browser
+handling away from the agents.
+
+When a second agent opens a browser, the agent gets its own browser window. 
+IT MUST NOT USE THE SAME BROWSER WINDOW! The second agent WILL NOT open another 
+browser session.
+
+## Known Limitation: Iframe Context
+
+Multi-step interactions within iframes require specifying iframe_selector for each action.
+Browser context resets after each tool call for reliability. This is intentional design
+to prevent context state bugs. DO NOT attempt to "fix" by persisting iframe context.
+
+## Performance Considerations
+
+We do not mind additional overhead from validations. The most important thing is that the code is robust.
+
+## Tip for Debugging
+
+Do you find any obvious errors in the code? Please do rubber duck 
+debugging. Imagine you are the first agent that establishes a 
+connection. You connect and want to navigate. You call the function 
+to go to a website, but probably receive an error, because you have
+to open the browser first. Or do you not receive and error and the
+MCP server automatically opens a browser? That would also be fine.
+Then you open the browse, if not open yet. Then you click 
+around a bit. Then another agent 
+establishes a separate MCP server connection and does the same. 
+Then the first agent is done with his work and closes the connection. 
+The second continues working. In this rubber duck 
+journey, is there anything that does not work well?
+"""
+
 #region Imports
 import os
 import sys
@@ -7,16 +50,20 @@ import time
 import psutil
 import socket
 import shutil
-import hashlib
 import asyncio
+import hashlib
 import tempfile
 import platform
+import traceback
 import subprocess
 import contextlib
 import urllib.request
 from pathlib import Path
 from bs4 import BeautifulSoup
 from typing import Callable, Optional, Tuple, Dict, Any
+
+import logging
+logger = logging.getLogger(__name__)
 #endregion Imports
 
 #region Browser
@@ -28,7 +75,9 @@ from selenium.common.exceptions import (
     NoSuchWindowException,
     StaleElementReferenceException,
     WebDriverException,
+    ElementClickInterceptedException,
 )
+
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 #endregion
@@ -38,33 +87,68 @@ from dotenv import load_dotenv
 load_dotenv()
 #endregion
 
-
-# -----------------------------
-# Constants / policy parameters
-# -----------------------------
-ACTION_LOCK_ACQUIRE_TIMEOUT_SEC = 5.0      # How long to wait to acquire the action lock
-ACTION_LOCK_MAX_HOLD_SEC = 10.0            # Hard cap to prevent indefinite blocking
+#region Constants / policy parameters
 START_LOCK_WAIT_SEC = 8.0                  # How long to wait to acquire the startup lock
 RENDEZVOUS_TTL_SEC = 24 * 3600             # How long a rendezvous file is considered valid
-
+#endregion
 
 #region Configuration and keys
 def get_env_config() -> dict:
     """
     Read environment variables and validate required ones.
-    Required: CHROME_PROFILE_USER_DATA_DIR
-    Optional: CHROME_PROFILE_NAME (default 'Default')
-              CHROME_EXECUTABLE_PATH
-              CHROME_REMOTE_DEBUG_PORT
+
+    Prioritizes Chrome Beta over Chrome Canary over Chrome. This is to free the Chrome instance. Chrome is likely
+    used by the user already. It is easier to separate the executables. If a user already has the Chrome executable open,
+    the MCP will not work properly as the Chrome DevTool Debug mode will not open when Chrome is already open in normal mode.
+    We prioritize Chrome Beta because it is more stable than Canary.
+
+    Required:   Either CHROME_PROFILE_USER_DATA_DIR, BETA_PROFILE_USER_DATA_DIR, or CANARY_PROFILE_USER_DATA_DIR
+    Optional:   CHROME_PROFILE_NAME (default 'Default')
+                CHROME_EXECUTABLE_PATH
+                BETA_EXECUTABLE_PATH (overrides CHROME_EXECUTABLE_PATH)
+                CANARY_EXECUTABLE_PATH (overrides BETA and CHROME)
+                CHROME_REMOTE_DEBUG_PORT
+
+    If BETA_EXECUTABLE_PATH is set, expects:
+                BETA_PROFILE_USER_DATA_DIR
+                BETA_PROFILE_NAME
+    If CANARY_EXECUTABLE_PATH is set, expects:
+                CANARY_PROFILE_USER_DATA_DIR
+                CANARY_PROFILE_NAME
     """
-    user_data_dir = os.getenv("CHROME_PROFILE_USER_DATA_DIR", "").strip()
-    if not user_data_dir:
+    # Base (generic) config
+    user_data_dir = (os.getenv("CHROME_PROFILE_USER_DATA_DIR") or "").strip()
+    if not user_data_dir and not os.getenv("BETA_PROFILE_USER_DATA_DIR") and not os.getenv("CANARY_PROFILE_USER_DATA_DIR"):
         raise EnvironmentError("CHROME_PROFILE_USER_DATA_DIR is required.")
 
-    profile_name = os.getenv("CHROME_PROFILE_NAME", "Default").strip() or "Default"
-    chrome_path = os.getenv("CHROME_EXECUTABLE_PATH", "").strip() or None
-    fixed_port = os.getenv("CHROME_REMOTE_DEBUG_PORT", "").strip()
-    fixed_port = int(fixed_port) if fixed_port.isdigit() else None
+    profile_name = (os.getenv("CHROME_PROFILE_NAME") or "Default").strip() or "Default"
+    chrome_path = (os.getenv("CHROME_EXECUTABLE_PATH") or "").strip() or None
+
+    # Prefer Beta > Canary > Generic Chrome
+    canary_path = (os.getenv("CANARY_EXECUTABLE_PATH") or "").strip()
+    if canary_path:
+        chrome_path = canary_path
+        user_data_dir = (os.getenv("CANARY_PROFILE_USER_DATA_DIR") or "").strip()
+        profile_name = (os.getenv("CANARY_PROFILE_NAME") or "").strip() or "Default"
+        if not user_data_dir:
+            raise EnvironmentError("CANARY_PROFILE_USER_DATA_DIR is required when CANARY_EXECUTABLE_PATH is set.")
+
+    beta_path = (os.getenv("BETA_EXECUTABLE_PATH") or "").strip()
+    if beta_path:
+        chrome_path = beta_path
+        user_data_dir = (os.getenv("BETA_PROFILE_USER_DATA_DIR") or "").strip()
+        profile_name = (os.getenv("BETA_PROFILE_NAME") or "").strip() or "Default"
+        if not user_data_dir:
+            raise EnvironmentError("BETA_PROFILE_USER_DATA_DIR is required when BETA_EXECUTABLE_PATH is set.")
+
+    fixed_port_env = (os.getenv("CHROME_REMOTE_DEBUG_PORT") or "").strip()
+    fixed_port = int(fixed_port_env) if fixed_port_env.isdigit() else None
+
+    if not user_data_dir:
+            raise EnvironmentError(
+                "No user_data_dir selected. Set CHROME_PROFILE_USER_DATA_DIR, or provide "
+                "BETA_EXECUTABLE_PATH + BETA_PROFILE_USER_DATA_DIR (or CANARY_* equivalents)."
+            )
 
     return {
         "user_data_dir": user_data_dir,
@@ -105,12 +189,11 @@ def profile_key(config: Optional[dict] = None) -> str:
 #endregion
 
 #region Globals
-INTRA_PROCESS_LOCK = asyncio.Lock()
-
 DRIVER = None
 DEBUGGER_HOST: Optional[str] = None
 DEBUGGER_PORT: Optional[int] = None
 MY_TAG: Optional[str] = None
+ALLOW_ATTACH_ANY = os.getenv("MCP_ATTACH_ANY_PROFILE", "0") == "1"
 
 # Single-window identity for this process (the MCP server will be started independently by multiple agents; each has its own IDs)
 TARGET_ID: Optional[str] = None
@@ -120,12 +203,41 @@ LOCK_DIR = os.getenv("MCP_BROWSER_LOCK_DIR") or str(Path(tempfile.gettempdir()) 
 Path(LOCK_DIR).mkdir(parents=True, exist_ok=True)
 
 # Action lock TTL (post-action exclusivity) and wait time
-ACTION_LOCK_TTL_SECS = int(os.getenv("MCP_ACTION_LOCK_TTL", "10"))
-ACTION_LOCK_WAIT_SECS = int(os.getenv("MCP_ACTION_LOCK_WAIT", "30"))
+ACTION_LOCK_TTL_SECS = int(os.getenv("MCP_ACTION_LOCK_TTL", "30"))
+ACTION_LOCK_WAIT_SECS = int(os.getenv("MCP_ACTION_LOCK_WAIT", "60"))
 FILE_MUTEX_STALE_SECS = int(os.getenv("MCP_FILE_MUTEX_STALE_SECS", "60"))
 
 # Truncation
 MAX_SNAPSHOT_CHARS = int(os.getenv("MCP_MAX_SNAPSHOT_CHARS", "0"))
+#endregion
+
+#region Lock
+MCP_INTRA_PROCESS_LOCK: Optional[asyncio.Lock] = None
+def get_intra_process_lock() -> asyncio.Lock:
+    global MCP_INTRA_PROCESS_LOCK
+    if MCP_INTRA_PROCESS_LOCK is None:
+        MCP_INTRA_PROCESS_LOCK = asyncio.Lock()
+    return MCP_INTRA_PROCESS_LOCK
+
+def _renew_action_lock(owner: str, ttl: int) -> bool:
+    """
+    Extend the action lock if owned by `owner`, or if stale. No-op if owned by someone else and not stale.
+    Returns True if we wrote a new expiry.
+    """
+    softlock_json, softlock_mutex, _ = _lock_paths()
+    try:
+        with _file_mutex(softlock_mutex, stale_secs=FILE_MUTEX_STALE_SECS, wait_timeout=1.0):
+            state = _read_softlock(softlock_json)
+            cur_owner = state.get("owner")
+            expires_at = float(state.get("expires_at", 0.0) or 0.0)
+
+            if cur_owner == owner or expires_at <= _now():
+                new_exp = _now() + int(ttl)
+                _write_softlock(softlock_json, {"owner": owner, "expires_at": new_exp})
+                return True
+            return False
+    except Exception:
+        return False
 #endregion
 
 #region Cross-process softlock (JSON + file mutex) keyed by profile_key(CONFIG)
@@ -228,12 +340,6 @@ def _acquire_softlock(owner: str, ttl: int, wait: bool = True, wait_timeout: flo
             return result
         time.sleep(0.05)
 
-def _renew_action_lock(owner: str, ttl: int = ACTION_LOCK_TTL_SECS):
-    try:
-        _acquire_softlock(owner=owner, ttl=ttl, wait=False, wait_timeout=0) # 'wait=False' makes this a no-wait best-effort renew
-    except Exception:
-        pass
-
 def _release_action_lock(owner: str) -> bool:
     softlock_json, softlock_mutex, _ = _lock_paths()
     with _file_mutex(softlock_mutex, stale_secs=FILE_MUTEX_STALE_SECS, wait_timeout=5.0):
@@ -247,8 +353,9 @@ def _acquire_action_lock_or_error(owner: str) -> Optional[str]:
     res = _acquire_softlock(owner=owner, ttl=ACTION_LOCK_TTL_SECS, wait=True, wait_timeout=ACTION_LOCK_WAIT_SECS)
     if res.get("acquired"):
         return None
-    # Busy – return a compact JSON payload
+    
     return json.dumps({
+        "ok": False,
         "error": "locked",
         "owner": res.get("owner"),
         "expires_at": res.get("expires_at"),
@@ -256,13 +363,137 @@ def _acquire_action_lock_or_error(owner: str) -> Optional[str]:
     })
 #endregion
 
-#begin Driver & window
-def _ensure_driver():
-    global DRIVER, DEBUGGER_HOST, DEBUGGER_PORT
-    if DRIVER is None:
-        host, port, _ = start_or_attach_chrome_from_env(get_env_config())
-        DRIVER = create_webdriver(host, port, get_env_config())
+#region Driver & window
+def _resolve_chrome_executable(cfg: dict) -> str:
+    if cfg.get("chrome_path"):
+            return cfg["chrome_path"]
+    
+
+    # Try config keys first
+    candidates = [
+        cfg.get("chrome_executable"),
+        cfg.get("chrome_binary"),
+        cfg.get("chrome_executable_path"),
+        os.getenv("CHROME_EXECUTABLE_PATH"),
+    ]
+    # Common macOS fallbacks
+    defaults = [
+        "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    ]
+    for p in candidates + defaults:
+        if p and os.path.exists(p):
+            return p
+    raise FileNotFoundError(
+        "Chrome executable not found. Set CHROME_EXECUTABLE_PATH to the full binary path, "
+        "e.g. /Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta"
+    )
+
+def _read_devtools_active_port(user_data_dir: str) -> int | None:
+    p = Path(user_data_dir) / "DevToolsActivePort"
+    if not p.exists():
+        return None
+    try:
+        first = p.read_text().splitlines()[0].strip()
+        return int(first)
+    except Exception:
+        return None
+
+def _is_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+def _launch_chrome_with_debug(cfg: dict, port: int) -> None:
+    exe = _resolve_chrome_executable(cfg)
+    udir = cfg["user_data_dir"]
+    prof = cfg.get("profile_name")
+    cmd = [
+        exe,
+        f"--user-data-dir={udir}",
+        f"--remote-debugging-port={port}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+    ]
+    if prof:
+        cmd.append(f"--profile-directory={prof}")
+    # Start detached; Chrome writes DevToolsActivePort when ready.
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def _ensure_debugger_ready(cfg: dict, max_wait_secs: float | None = None) -> None:
+    """
+    Ensure a debuggable Chrome is running for the configured user-data-dir,
+    set DEBUGGER_HOST/DEBUGGER_PORT accordingly.
+    """
+    global DEBUGGER_HOST, DEBUGGER_PORT
+    try:
+        host, port, _ = start_or_attach_chrome_from_env(cfg)
+        if not (ALLOW_ATTACH_ANY or _verify_port_matches_profile(host, port, cfg["user_data_dir"])):
+            raise RuntimeError("DevTools port does not belong to the configured profile")
         DEBUGGER_HOST, DEBUGGER_PORT = host, port
+        return
+    except Exception:
+        DEBUGGER_HOST = None
+        DEBUGGER_PORT = None
+
+    # Allow override by env; default to 30 seconds
+    try:
+        max_wait_secs = float(os.getenv("MCP_DEVTOOLS_MAX_WAIT_SECS", "30")) if max_wait_secs is None else float(max_wait_secs)
+    except Exception:
+        max_wait_secs = 30.0
+
+    udir = cfg["user_data_dir"]
+    env_port = os.getenv("CHROME_REMOTE_DEBUG_PORT")
+    try:
+        env_port = int(env_port) if env_port else None
+    except Exception:
+        env_port = None
+
+    # 1) If the profile already wrote DevToolsActivePort, try to attach to that.
+    file_port = _read_devtools_active_port(udir)
+    if file_port and _is_port_open("127.0.0.1", file_port):
+        DEBUGGER_HOST, DEBUGGER_PORT = "127.0.0.1", file_port
+        return
+
+    # 2) If allowed, attach to a known open port (useful in shared test envs)
+    if ALLOW_ATTACH_ANY:
+        for p in filter(None, [env_port, 9223]):
+            if _is_port_open("127.0.0.1", p):
+                DEBUGGER_HOST, DEBUGGER_PORT = "127.0.0.1", p
+                return
+
+    # 3) Launch our own debuggable Chrome on env_port or default 9225
+    port = env_port or 9225
+    _launch_chrome_with_debug(cfg, port)
+
+    # Wait until Chrome writes the file OR the TCP port answers
+    t0 = time.time()
+    while time.time() - t0 < max_wait_secs:
+        p = _read_devtools_active_port(udir)
+        if (p and _is_port_open("127.0.0.1", p)) or _is_port_open("127.0.0.1", port):
+            DEBUGGER_HOST, DEBUGGER_PORT = "127.0.0.1", p or port
+            return
+        time.sleep(0.1)
+
+    DEBUGGER_HOST = DEBUGGER_PORT = None
+
+def _ensure_driver() -> None:
+    """Attach Selenium to the debuggable Chrome instance (headed by default)."""
+    global DRIVER
+    if DRIVER is not None:
+        return
+
+    cfg = get_env_config()
+    _ensure_debugger_ready(cfg)  # allow full wait (e.g., 30s via env)
+    if not (DEBUGGER_HOST and DEBUGGER_PORT):
+        return  # caller will return driver_not_initialized
+
+    # Use the shared factory so Chromedriver logs and options are consistent
+    DRIVER = create_webdriver(DEBUGGER_HOST, DEBUGGER_PORT, cfg)
 
 def ensure_process_tag() -> str:
     global MY_TAG
@@ -270,47 +501,214 @@ def ensure_process_tag() -> str:
         MY_TAG = make_process_tag()
     return MY_TAG
 
+def _validate_window_context(driver: webdriver.Chrome, expected_target_id: str) -> bool:
+    """
+    Validate that the current window context matches the expected target.
+    Returns True if validation passes, False otherwise.
+    Handles NoSuchWindowException gracefully.
+    """
+    if not expected_target_id:
+        return False
+    
+    try:
+        # Check if current window handle exists and matches expected target
+        current_handle = driver.current_window_handle
+        if current_handle and current_handle.endswith(expected_target_id):
+            return True
+            
+        # Double-check by getting target info via CDP
+        try:
+            info = driver.execute_cdp_cmd("Target.getTargetInfo", {}) or {}
+            current_target = (info.get("targetInfo") or {}).get("targetId") or info.get("targetId")
+            return current_target == expected_target_id
+        except Exception:
+            pass
+            
+        return False
+    except Exception:
+        # NoSuchWindowException or other window-related exceptions
+        return False
+
 def _ensure_singleton_window(driver: webdriver.Chrome):
     global TARGET_ID, WINDOW_ID
 
+    # 0) If we already have a target, validate context and attempt recovery
     if TARGET_ID:
+        # First validate we're in the correct window context
+        if _validate_window_context(driver, TARGET_ID):
+            return  # Already in correct window
+            
+        # Context validation failed - attempt recovery
         h = _handle_for_target(driver, TARGET_ID)
+        if h:
+            try:
+                driver.switch_to.window(h)
+                # Verify recovery succeeded
+                if _validate_window_context(driver, TARGET_ID):
+                    return
+            except Exception:
+                pass  # Recovery failed, will recreate window below
+        
+        # Window handle not found or recovery failed - clear target and recreate
+        TARGET_ID = None
+        WINDOW_ID = None
+
+    # 1) First-time in this process or recovery failed: create a new real OS window for this agent
+    if not TARGET_ID:
+        try:
+            win = driver.execute_cdp_cmd("Browser.createWindow", {"state": "normal"})
+            if not isinstance(win, dict):
+                raise RuntimeError(f"Browser.createWindow returned {win!r}")
+            WINDOW_ID = win.get("windowId")
+            TARGET_ID = win.get("targetId")
+
+            if not TARGET_ID:
+                # Fallback: ensure there is a page target tied to a new window
+                t = driver.execute_cdp_cmd("Target.createTarget", {"url": "about:blank", "newWindow": True})
+                if not isinstance(t, dict) or "targetId" not in t:
+                    raise RuntimeError(f"Target.createTarget returned {t!r}")
+                TARGET_ID = t["targetId"]
+                if not WINDOW_ID:
+                    try:
+                        w = driver.execute_cdp_cmd("Browser.getWindowForTarget", {"targetId": TARGET_ID}) or {}
+                        WINDOW_ID = w.get("windowId")
+                    except Exception:
+                        WINDOW_ID = None
+        except Exception:
+            # Last resort: create via Target API
+            t = driver.execute_cdp_cmd("Target.createTarget", {"url": "about:blank", "newWindow": True})
+            if not isinstance(t, dict) or "targetId" not in t:
+                raise RuntimeError(f"Target.createTarget returned {t!r}")
+            TARGET_ID = t["targetId"]
+            try:
+                w = driver.execute_cdp_cmd("Browser.getWindowForTarget", {"targetId": TARGET_ID}) or {}
+                WINDOW_ID = w.get("windowId")
+            except Exception:
+                WINDOW_ID = None
+
+    # 2) Map targetId -> Selenium handle (with brief retry)
+    h = _handle_for_target(driver, TARGET_ID)
+    if not h:
+        for _ in range(20):  # ~1s
+            time.sleep(0.05)
+            h = _handle_for_target(driver, TARGET_ID)
+            if h:
+                break
+    
+    if h:
+        driver.switch_to.window(h)
+        # Final validation to ensure we're in the correct window
+        if not _validate_window_context(driver, TARGET_ID):
+            raise RuntimeError(f"Failed to establish correct window context for target {TARGET_ID}")
+    else:
+        raise RuntimeError(f"Failed to find window handle for target {TARGET_ID}")
+
+def _ensure_driver_and_window() -> None:
+    global DRIVER, TARGET_ID
+    _ensure_driver()
+    if DRIVER is None:
+        return
+    _ensure_singleton_window(DRIVER)
+
+def _ensure_main_window(driver):
+    """
+    Ensures there is at least one page window, selects it, and returns (target_id, window_handle).
+    Raises RuntimeError if it cannot create/select a window.
+    """
+    # Try existing pages
+    infos = driver.execute_cdp_cmd("Target.getTargets", {}) or {}
+    pages = [t for t in infos.get("targetInfos", []) if t.get("type") == "page"]
+    for t in pages:
+        handle = _handle_for_target(driver, t.get("targetId"))
+        if handle:
+            driver.switch_to.window(handle)
+            return t.get("targetId"), handle
+
+    # Create a new window
+    created = driver.execute_cdp_cmd("Target.createTarget", {"url": "about:blank", "newWindow": True})
+    tid = created.get("targetId")
+    if not tid:
+        raise RuntimeError("Failed to create a new page target")
+
+    # Wait briefly for Selenium to surface the handle
+    for _ in range(50):  # ~5s
+        handle = _handle_for_target(driver, tid)
+        if handle:
+            driver.switch_to.window(handle)
+            return tid, handle
+        time.sleep(0.1)
+
+    raise RuntimeError("Created a target but could not obtain a window handle")
+
+
+def _ensure_session_window(driver, session):
+    tid = session.get("target_id")
+    if tid:
+        h = _handle_for_target(driver, tid)
         if h:
             driver.switch_to.window(h)
             return
 
-    # Try to create a real OS window; if no targetId is returned, create one explicitly.
+    # Create a real OS window with its own target
     try:
         win = driver.execute_cdp_cmd("Browser.createWindow", {"state": "normal"})
-        WINDOW_ID = win.get("windowId")
-        TARGET_ID = win.get("targetId")
-        if not TARGET_ID:
-            t = driver.execute_cdp_cmd("Target.createTarget", {"url": "about:blank", "newWindow": True})
-            TARGET_ID = t["targetId"]
-            if not WINDOW_ID:
-                try:
-                    w = driver.execute_cdp_cmd("Browser.getWindowForTarget", {"targetId": TARGET_ID})
-                    WINDOW_ID = w.get("windowId")
-                except Exception:
-                    WINDOW_ID = None
+        session["window_id"] = win["windowId"]
+        session["target_id"] = win["targetId"]
     except Exception:
-        # Fallback to Target API directly
+        # Fallback to a new window via Target API
         t = driver.execute_cdp_cmd("Target.createTarget", {"url": "about:blank", "newWindow": True})
-        TARGET_ID = t["targetId"]
-        try:
-            w = driver.execute_cdp_cmd("Browser.getWindowForTarget", {"targetId": TARGET_ID})
-            WINDOW_ID = w.get("windowId")
-        except Exception:
-            WINDOW_ID = None
+        session["target_id"] = t["targetId"]
+        # You can get window_id after the fact:
+        w = driver.execute_cdp_cmd("Browser.getWindowForTarget", {"targetId": session["target_id"]})
+        session["window_id"] = w["windowId"]
 
-    h = _handle_for_target(driver, TARGET_ID)
+    h = _handle_for_target(driver, session["target_id"])
     if h:
         driver.switch_to.window(h)
 
-def _ensure_driver_and_window():
-    _ensure_driver()
-    ensure_process_tag()
-    _ensure_singleton_window(DRIVER)
+def _close_extra_blank_windows_safe(driver, exclude_handles=None) -> int:
+    exclude = set(exclude_handles or ())
+    # Only operate within our own OS window
+    own_window_id = WINDOW_ID
+    if own_window_id is None:
+        return 0
+
+    try:
+        keep = driver.current_window_handle
+    except Exception:
+        keep = None
+
+    closed = 0
+    for h in list(getattr(driver, "window_handles", [])):
+        if h in exclude or (keep and h == keep):
+            continue
+        try:
+            driver.switch_to.window(h)
+            # Map this handle -> targetId -> windowId
+            info = driver.execute_cdp_cmd("Target.getTargetInfo", {}) or {}
+            tid = (info.get("targetInfo") or {}).get("targetId") or info.get("targetId")
+            if not tid:
+                continue
+            w = driver.execute_cdp_cmd("Browser.getWindowForTarget", {"targetId": tid}) or {}
+            if w.get("windowId") != own_window_id:
+                # Belongs to another agent's OS window; do not touch
+                continue
+
+            url = (driver.current_url or "").lower()
+            title = (driver.title or "").strip()
+            if url in ("about:blank", "chrome://newtab/") or (not url and not title):
+                driver.close()
+                closed += 1
+        except Exception:
+            continue
+
+    # Restore our original window if it still exists
+    if keep and keep in getattr(driver, "window_handles", []):
+        try:
+            driver.switch_to.window(keep)
+        except Exception:
+            pass
+    return closed
 
 def close_singleton_window() -> bool:
     """
@@ -343,65 +741,81 @@ def close_singleton_window() -> bool:
 def _handle_for_target(driver, target_id: Optional[str]) -> Optional[str]:
     if not target_id:
         return None
-    # Fast path
+
+    # Fast path: Selenium handle suffix matches CDP targetId
     for h in driver.window_handles:
-        if h.endswith(target_id):
-            return h
-    # Robust path
+        try:
+            if h.endswith(target_id):
+                return h
+        except Exception:
+            pass
+
+    # Nudge Chrome to foreground that target, then retry a bit
+    try:
+        driver.execute_cdp_cmd("Target.activateTarget", {"targetId": target_id})
+    except Exception:
+        pass
+
+    for _ in range(20):  # ~1s total
+        for h in driver.window_handles:
+            try:
+                if h.endswith(target_id):
+                    return h
+            except Exception:
+                continue
+        time.sleep(0.05)
+
+    # Robust path: probe handles via CDP, then list all targets
     current = driver.current_window_handle if driver.window_handles else None
     try:
         for h in driver.window_handles:
-            driver.switch_to.window(h)
-            info = driver.execute_cdp_cmd("Target.getTargetInfo", {})
-            tid = info.get("targetInfo", {}).get("targetId") or info.get("targetId")
-            if tid == target_id:
-                return h
+            try:
+                driver.switch_to.window(h)
+                info = driver.execute_cdp_cmd("Target.getTargetInfo", {}) or {}
+                tid = (info.get("targetInfo") or {}).get("targetId") or info.get("targetId")
+                if tid == target_id:
+                    return h
+            except Exception:
+                continue
+
+        # Last resort: enumerate all targets and try another activation
+        try:
+            targets = driver.execute_cdp_cmd("Target.getTargets", {}) or {}
+            for ti in (targets.get("targetInfos") or []):
+                if ti.get("targetId") == target_id:
+                    try:
+                        driver.execute_cdp_cmd("Target.activateTarget", {"targetId": target_id})
+                    except Exception:
+                        pass
+                    # One last quick scan
+                    for h in driver.window_handles:
+                        try:
+                            if h.endswith(target_id):
+                                return h
+                        except Exception:
+                            continue
+                    break
+        except Exception:
+            pass
     finally:
-        if current and current in driver.window_handles:
-            driver.switch_to.window(current)
-    # Last resort
-    try:
-        driver.execute_cdp_cmd("Target.activateTarget", {"targetId": target_id})
-        for h in driver.window_handles:
-            if h.endswith(target_id):
-                return h
-    except Exception:
-        pass
+        if current and current in getattr(driver, "window_handles", []):
+            try:
+                driver.switch_to.window(current)
+            except Exception:
+                pass
+
     return None
 
-def _ensure_session_window(driver, session):
-    tid = session.get("target_id")
-    if tid:
-        h = _handle_for_target(driver, tid)
-        if h:
-            driver.switch_to.window(h)
-            return
+#endregion
 
-    # Create a real OS window with its own target
-    try:
-        win = driver.execute_cdp_cmd("Browser.createWindow", {"state": "normal"})
-        session["window_id"] = win["windowId"]
-        session["target_id"] = win["targetId"]
-    except Exception:
-        # Fallback to a new window via Target API
-        t = driver.execute_cdp_cmd("Target.createTarget", {"url": "about:blank", "newWindow": True})
-        session["target_id"] = t["targetId"]
-        # You can get window_id after the fact:
-        w = driver.execute_cdp_cmd("Browser.getWindowForTarget", {"targetId": session["target_id"]})
-        session["window_id"] = w["windowId"]
-
-    h = _handle_for_target(driver, session["target_id"])
-    if h:
-        driver.switch_to.window(h)
-
-#region
+#region Wait and snapshot
 def _wait_document_ready(timeout: float = 10.0):
     try:
         WebDriverWait(DRIVER, timeout).until(
             lambda d: d.execute_script("return document.readyState") in ("interactive", "complete")
         )
     except Exception:
-        # Non-fatal; proceed with snapshot
+        # Not fatal
         pass
 
 def _make_page_snapshot(max_chars: Optional[int] = None) -> Dict[str, Any]:
@@ -449,30 +863,44 @@ def _make_page_snapshot(max_chars: Optional[int] = None) -> Dict[str, Any]:
 #endregion
 
 #region Tool helpers (clickable wait using a lambda on the element)
+
+def _same_dir(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    try:
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    except Exception:
+        return a == b
+
+def _devtools_user_data_dir(host: str, port: int, timeout: float = 1.5) -> str | None:
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/json/version", timeout=timeout) as resp:
+            meta = json.load(resp)
+            return meta.get("userDataDir")
+    except Exception:
+        return None
+
+def _verify_port_matches_profile(host: str, port: int, expected_dir: str) -> bool:
+    actual = _devtools_user_data_dir(host, port)
+    return _same_dir(actual, expected_dir)
+
 def _wait_clickable_element(el, timeout: float = 10.0):
     WebDriverWait(DRIVER, timeout).until(lambda d: el.is_displayed() and el.is_enabled())
     return el
 #endregion
 
-
-# -----------------------------
-# Paths for coordination artifacts
-# -----------------------------
+#region Paths for coordination artifacts
 def rendezvous_path(config: dict) -> str:
     return os.path.join(tempfile.gettempdir(), f"mcp_chrome_rendezvous_{profile_key(config)}.json")
 
 def start_lock_dir(config: dict) -> str:
     return os.path.join(tempfile.gettempdir(), f"mcp_chrome_start_lock_{profile_key(config)}")
 
-def action_lock_dir(config: dict) -> str:
-    return os.path.join(tempfile.gettempdir(), f"mcp_chrome_action_lock_{profile_key(config)}")
-
 def chromedriver_log_path(config: dict) -> str:
     return os.path.join(tempfile.gettempdir(), f"chromedriver_shared_{profile_key(config)}_{os.getpid()}.log")
+#endregion
 
-# -----------------------------
-# DevTools endpoint and Chrome discovery
-# -----------------------------
+#region DevTools endpoint and Chrome discovery
 def is_debugger_listening(host: str, port: int, timeout: float = 3.0) -> bool:
     try:
         with urllib.request.urlopen(f"http://{host}:{port}/json/version", timeout=timeout) as resp:
@@ -513,9 +941,38 @@ def find_chrome_process_by_port(port: int) -> Optional[psutil.Process]:
             continue
     return None
 
-# -----------------------------
-# Rendezvous API
-# -----------------------------
+def is_default_user_data_dir(user_data_dir: str) -> bool:
+    """Return True if user_data_dir is one of Chrome's default roots (where DevTools is refused)."""
+    p = Path(user_data_dir).expanduser().resolve()
+    system = platform.system()
+    defaults = []
+    if system == "Darwin":
+        defaults = [
+            Path.home() / "Library/Application Support/Google/Chrome",
+            Path.home() / "Library/Application Support/Google/Chrome Beta",
+            Path.home() / "Library/Application Support/Google/Chrome Canary",
+        ]
+    elif system == "Windows":
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            base = Path(local) / "Google"
+            defaults = [
+                base / "Chrome" / "User Data",
+                base / "Chrome Beta" / "User Data",
+                base / "Chrome SxS" / "User Data",  # Canary
+            ]
+    else:  # Linux
+        home = Path.home()
+        defaults = [
+            home / ".config/google-chrome",
+            home / ".config/google-chrome-beta",
+            home / ".config/google-chrome-unstable",  # Canary
+            home / ".config/chromium",
+        ]
+    return any(p == d for d in defaults)
+#endregion
+
+#region Rendezvous API
 def _read_json(path: str) -> Optional[dict]:
     try:
         with open(path, "r") as f:
@@ -559,10 +1016,9 @@ def clear_rendezvous(config: dict) -> None:
         os.remove(rendezvous_path(config))
     except Exception:
         pass
+#endregion
 
-# -----------------------------
-# Startup lock (single starter)
-# -----------------------------
+#region Startup lock (single starter)
 def acquire_start_lock(config: dict, timeout_sec: float = START_LOCK_WAIT_SEC) -> bool:
     lock_dir = start_lock_dir(config)
     deadline = time.time() + timeout_sec
@@ -598,11 +1054,9 @@ def release_start_lock(config: dict) -> None:
         shutil.rmtree(start_lock_dir(config), ignore_errors=True)
     except Exception:
         pass
+#endregion
 
-
-# -----------------------------
-# Attach or launch Chrome
-# -----------------------------
+#region Attach or launch Chrome
 def _chrome_binary_for_platform(config: dict) -> str:
     if config.get("chrome_path"):
         return config["chrome_path"]
@@ -623,17 +1077,64 @@ def _chrome_binary_for_platform(config: dict) -> str:
             return c
     return "chrome"
 
+def devtools_active_port_from_file(user_data_dir: str) -> Optional[int]:
+    """
+    If Chrome is running this profile with remote debugging enabled,
+    it writes 'DevToolsActivePort' in the user-data-dir. Return that port if valid.
+    """
+    try:
+        p = Path(user_data_dir) / "DevToolsActivePort"
+        if not p.exists():
+            return None
+        lines = p.read_text().splitlines()
+        if not lines:
+            return None
+        first = lines[0].strip()
+        return int(first) if first.isdigit() else None
+    except Exception:
+        return None
+
 def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[psutil.Process]]:
     user_data_dir = config["user_data_dir"]
     profile_name = config["profile_name"]
     fixed_port = config.get("fixed_port")
     host = "127.0.0.1"
 
+    # Ensure directory exists
+    Path(user_data_dir).mkdir(parents=True, exist_ok=True)
+
+    # Refuse default channel dirs unless explicitly allowed
+    if is_default_user_data_dir(user_data_dir) and os.getenv("MCP_ALLOW_DEFAULT_USER_DATA_DIR", "0") != "1":
+        raise RuntimeError(
+            "Remote debugging is disabled on Chrome's default user-data directories.\n"
+            f"Set *_PROFILE_USER_DATA_DIR to a separate path (e.g., '{Path(user_data_dir).parent}/Chrome Beta MCP'), "
+            "optionally seed it from your existing profile, then retry.\n"
+            "To override (not recommended), set MCP_ALLOW_DEFAULT_USER_DATA_DIR=1."
+        )
+
+# If a DevTools port is already active for this profile, attach to it.
+    if not fixed_port:
+        existing_port = devtools_active_port_from_file(user_data_dir)
+        if existing_port and is_debugger_listening(host, existing_port):
+            chrome_proc = find_chrome_process_by_port(existing_port)
+            write_rendezvous(config, existing_port, chrome_proc.pid if chrome_proc else os.getpid())
+            return host, existing_port, None
+
     # Fixed port path
     if fixed_port:
+        # If the profile is already debuggable on another port, prefer attaching to that.
+        existing_port = devtools_active_port_from_file(user_data_dir)
+        if existing_port and existing_port != fixed_port and is_debugger_listening(host, existing_port):
+            chrome_proc = find_chrome_process_by_port(existing_port)
+            write_rendezvous(config, existing_port, chrome_proc.pid if chrome_proc else os.getpid())
+            return host, existing_port, None
+
         port = fixed_port
         if is_debugger_listening(host, port):
+            chrome_proc = find_chrome_process_by_port(port)
+            write_rendezvous(config, port, chrome_proc.pid if chrome_proc else os.getpid())
             return host, port, None
+
         # Start Chrome on fixed port
         binary = _chrome_binary_for_platform(config)
         cmd = [
@@ -643,16 +1144,27 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
             f"--profile-directory={profile_name}",
             "--no-first-run",
             "--no-default-browser-check",
+            "about:blank",  
         ]
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # Wait for DevTools endpoint
         for _ in range(100):
             if is_debugger_listening(host, port):
+                chrome_proc = find_chrome_process_by_port(port)
+                write_rendezvous(config, port, chrome_proc.pid if chrome_proc else proc.pid)
                 return host, port, proc
             time.sleep(0.1)
+
         if chrome_running_with_userdata(user_data_dir):
             raise RuntimeError(
-                f"Chrome is already running with this profile but without remote debugging on {port}. "
-                "Close Chrome or relaunch with --remote-debugging-port set."
+                "DevTools endpoint did not appear. Likely causes:\n"
+                " - Chrome refused remote debugging because the user-data-dir is a default channel directory.\n"
+                " - Another Chrome instance (started without --remote-debugging-port) is holding this user-data-dir.\n"
+                "Actions:\n"
+                f" - Use a separate automation dir (e.g., '{Path(user_data_dir).parent}/Chrome Beta MCP'), "
+                "optionally seeded from your profile, and try again.\n"
+                " - Or ensure all Chrome/Chrome Beta processes are fully quit before starting."
             )
         raise RuntimeError(f"Failed to start Chrome with remote debugging on {port}.")
 
@@ -664,13 +1176,19 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
     got_lock = acquire_start_lock(config, timeout_sec=START_LOCK_WAIT_SEC)
     try:
         if not got_lock:
-            # Spin a little waiting for rendezvous creation by the winner
-            for _ in range(50):
-                port, pid = read_rendezvous(config)
-                if port:
-                    return host, port, None
-                time.sleep(0.1)
-            raise RuntimeError("Timeout acquiring start lock for Chrome rendezvous.")
+                    # Spin a little waiting for rendezvous by the winner
+                    for _ in range(50):
+                        port, pid = read_rendezvous(config)
+                        if port:
+                            return host, port, None
+                        # Also attach via DevToolsActivePort if it appears sooner
+                        p2 = devtools_active_port_from_file(user_data_dir)
+                        if p2 and is_debugger_listening(host, p2):
+                            chrome_proc = find_chrome_process_by_port(p2)
+                            write_rendezvous(config, p2, chrome_proc.pid if chrome_proc else os.getpid())
+                            return host, p2, None
+                        time.sleep(0.1)
+                    raise RuntimeError("Timeout acquiring start lock for Chrome rendezvous.")
 
         # Inside lock: recheck rendezvous
         port, pid = read_rendezvous(config)
@@ -687,6 +1205,7 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
             f"--profile-directory={profile_name}",
             "--no-first-run",
             "--no-default-browser-check",
+            "about:blank",
         ]
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -712,10 +1231,9 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
     finally:
         if got_lock:
             release_start_lock(config)
+#endregion
 
-# -----------------------------
-# Selenium WebDriver attached to shared Chrome
-# -----------------------------
+#region Selenium WebDriver attached to shared Chrome
 def create_webdriver(debugger_host: str, debugger_port: int, config: dict) -> webdriver.Chrome:
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service as ChromeService
@@ -735,19 +1253,25 @@ def create_webdriver(debugger_host: str, debugger_port: int, config: dict) -> we
 
     driver = webdriver.Chrome(service=service, options=options)
     return driver
+#endregion
 
-# -----------------------------
-# Per-process window ownership
-# -----------------------------
+#region Per-process window ownership
 def make_process_tag() -> str:
     import uuid
     return f"agent:{uuid.uuid4().hex}"
 
+def _cleanup_own_blank_tabs(driver):
+    handle = getattr(driver, "current_window_handle", None)
+    try:
+        _close_extra_blank_windows_safe(
+            driver,
+            exclude_handles={handle} if handle else None,
+        )
+    except Exception:
+        pass
+#endregion
 
-
-# -----------------------------
-# Resilience: retries and DOM utils
-# -----------------------------
+#region Resilience: retries and DOM utils
 def retry_op(fn: Callable, retries: int = 2, base_delay: float = 0.15):
     import random
     for attempt in range(retries + 1):
@@ -856,10 +1380,9 @@ def remove_unwanted_tags(html_content: str) -> str:
 def get_cleaned_html(driver: webdriver.Chrome) -> str:
     html_content = driver.page_source
     return remove_unwanted_tags(html_content)
+#endregion
 
-# -----------------------------
-# Diagnostics
-# -----------------------------
+#region Diagnostics
 def get_chrome_version() -> str:
     system = platform.system()
     try:
@@ -937,9 +1460,11 @@ def collect_diagnostics(driver: Optional[webdriver.Chrome], exc: Optional[Except
             parts.append(f"Browser version   : {ver.get('product', '<unknown>')}")
         except Exception:
             parts.append("Browser version   : <unknown>")
-        drv_ver = driver.capabilities.get("chromedriverVersion") or driver.capabilities.get("browserVersion") or "<unknown>"
+
+        cap = getattr(driver, "capabilities", None) or {}
+        drv_ver = cap.get("chromedriverVersion") or cap.get("browserVersion") or "<unknown>"
         parts.append(f"Driver version    : {drv_ver}")
-        opts = driver.capabilities.get("goog:chromeOptions", {}) or {}
+        opts = cap.get("goog:chromeOptions") or {}
         args = opts.get("args") or []
         parts.append(f"Chrome args       : {' '.join(args)}")
     if exc:
@@ -949,4 +1474,387 @@ def collect_diagnostics(driver: Optional[webdriver.Chrome], exc: Optional[Except
             f"Error message     : {exc}",
         ]
     return "\n".join(parts)
+#endregion
 
+#region Tool Implementation
+async def start_browser():
+    owner = ensure_process_tag()
+    try:
+        _ensure_driver_and_window()
+
+        if DRIVER is None:
+            diag = collect_diagnostics(None, None, get_env_config())
+            if isinstance(diag, str):
+                    diag = {"summary": diag}
+            return json.dumps({
+                "ok": False,
+                "error": "driver_not_initialized",
+                "driver_initialized": False,
+                "debugger": (
+                    f"{DEBUGGER_HOST}:{DEBUGGER_PORT}"
+                    if (DEBUGGER_HOST and DEBUGGER_PORT) else None
+                ),
+                "diagnostics": diag,
+                "message": "Failed to attach/launch a debuggable Chrome session."
+            })
+        
+        handle = getattr(DRIVER, "current_window_handle", None)
+        try:
+            _close_extra_blank_windows_safe(DRIVER, exclude_handles={handle} if handle else None)
+        except Exception:
+            pass
+
+        # Wait until the page is ready. Get a snapshot.
+        _wait_document_ready(timeout=5.0)
+        try:
+            snapshot = _make_page_snapshot()
+        except Exception:
+            snapshot = None
+        snapshot = snapshot or {
+            "url": "about:blank",
+            "title": "",
+            "html": "",
+            "truncated": False,
+        }
+
+        msg = ( # Human-friendly message
+            f"Browser session created successfully. "
+            f"Session ID: {owner}. "
+            f"Current URL: {snapshot.get('url') or 'about:blank'}"
+        )
+
+        payload = {
+            "ok": True,
+            "session_id": owner,
+            "debugger": f"{DEBUGGER_HOST}:{DEBUGGER_PORT}" if (DEBUGGER_HOST and DEBUGGER_PORT) else None,
+            "lock_ttl_seconds": ACTION_LOCK_TTL_SECS,
+            "snapshot": snapshot,
+            "message": msg,
+        }
+    
+        return json.dumps(payload)
+    except Exception as e:
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        snapshot = _make_page_snapshot() or {
+            "url": "about:blank",
+            "title": "",
+            "html": "",
+            "truncated": False,
+        }
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+    
+async def navigate_to_url(url, timeout):
+        try:
+            if not url or not isinstance(url, str):
+                snapshot = _make_page_snapshot()
+                return json.dumps({"ok": False, "error": "invalid_url", "snapshot": snapshot})
+
+            if DRIVER is None:
+                return json.dumps({"ok": False, "error": "driver_not_initialized"})
+
+
+            DRIVER.get(url)
+            _wait_document_ready(timeout=min(15.0, float(timeout)))
+            snapshot = _make_page_snapshot()
+            return json.dumps({"ok": True, "url": url, "snapshot": snapshot, "message": f"Navigated to {url}"})
+        except Exception as e:
+
+            diag = collect_diagnostics(DRIVER, e, get_env_config())
+            snapshot = _make_page_snapshot()
+            return json.dumps({
+                "ok": False,
+                "error": str(e),
+                "traceback": traceback.format_exc(),  # helps locate the exact line
+                "diagnostics": diag,
+                "snapshot": snapshot
+            })
+
+async def fill_text(
+    selector,
+    text,
+    selector_type,
+    clear_first,
+    timeout,
+    iframe_selector,
+    iframe_selector_type,
+    shadow_root_selector,
+    shadow_root_selector_type,
+):
+    try:
+
+        el = retry_op(lambda: find_element(
+            DRIVER,
+            selector,
+            selector_type,
+            timeout=int(timeout),
+            visible_only=True,
+            iframe_selector=iframe_selector,
+            iframe_selector_type=iframe_selector_type,
+            shadow_root_selector=shadow_root_selector,
+            shadow_root_selector_type=shadow_root_selector_type,
+            stay_in_context=True,
+        ))
+
+        if clear_first:
+            try:
+                el.clear()
+            except Exception:
+                pass
+        el.send_keys(text)
+        _wait_document_ready(timeout=5.0)
+
+        snapshot = _make_page_snapshot()
+        return json.dumps({"ok": True, "action": "fill_text", "selector": selector, "snapshot": snapshot})
+    except Exception as e:
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        snapshot = _make_page_snapshot()
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+    finally:
+        try:
+            if DRIVER is not None:
+                DRIVER.switch_to.default_content()
+        except Exception:
+            pass
+
+async def click_element(
+    selector,
+    selector_type,
+    timeout,
+    force_js,
+    iframe_selector,
+    iframe_selector_type,
+    shadow_root_selector,
+    shadow_root_selector_type,
+) -> str:
+    try:
+
+        el = retry_op(lambda: find_element(
+            DRIVER,
+            selector,
+            selector_type,
+            timeout=int(timeout),
+            visible_only=True,
+            iframe_selector=iframe_selector,
+            iframe_selector_type=iframe_selector_type,
+            shadow_root_selector=shadow_root_selector,
+            shadow_root_selector_type=shadow_root_selector_type,
+            stay_in_context=True,
+        ))
+
+        _wait_clickable_element(el, timeout=timeout)
+
+        if force_js:
+            DRIVER.execute_script("arguments[0].click();", el)
+        else:
+            try:
+                el.click()
+            except (ElementClickInterceptedException, StaleElementReferenceException):
+                el = retry_op(lambda: find_element(
+                    DRIVER, selector, selector_type, timeout=int(timeout),
+                    visible_only=True,
+                    iframe_selector=iframe_selector, iframe_selector_type=iframe_selector_type,
+                    shadow_root_selector=shadow_root_selector, shadow_root_selector_type=shadow_root_selector_type,
+                    stay_in_context=True,
+                ))
+                DRIVER.execute_script("arguments[0].click();", el)
+
+        _wait_document_ready(timeout=10.0)
+
+        snapshot = _make_page_snapshot()
+        return json.dumps({
+            "ok": True,
+            "action": "click",
+            "selector": selector,
+            "selector_type": selector_type,
+            "snapshot": snapshot,
+        })
+    except TimeoutException:
+        snapshot = _make_page_snapshot()
+        return json.dumps({
+            "ok": False,
+            "error": "timeout",
+            "selector": selector,
+            "selector_type": selector_type,
+            "snapshot": snapshot,
+        })
+    except Exception as e:
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        snapshot = _make_page_snapshot()
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+    finally:
+        try:
+            if DRIVER is not None:
+                DRIVER.switch_to.default_content()
+        except Exception:
+            pass
+
+async def take_screenshot(screenshot_path, return_base64, return_snapshot) -> str:
+    try:
+
+        png_b64 = DRIVER.get_screenshot_as_base64()
+        if screenshot_path:
+            with open(screenshot_path, "wb") as f:
+                f.write(DRIVER.get_screenshot_as_png())
+        payload = {"ok": True, "saved_to": screenshot_path}
+        if return_base64:
+            payload["base64"] = png_b64
+        
+        if return_snapshot:
+            payload["snapshot"] = _make_page_snapshot()
+        else:
+            payload["snapshot"] = "Omitted to save tokens."
+
+        return json.dumps(payload)
+    except Exception as e:
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        if return_snapshot:
+            snapshot = _make_page_snapshot()
+        else:
+            snapshot = "Omitted to save tokens."
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+
+async def get_debug_diagnostics_info() -> str:
+    try:
+        cfg = get_env_config()
+        udir = cfg.get("user_data_dir")
+        port_file = str(Path(udir) / "DevToolsActivePort") if udir else None
+
+        # Read DevToolsActivePort without relying on helpers
+        port_val = None
+        if udir:
+            p = Path(udir) / "DevToolsActivePort"
+            if p.exists():
+                try:
+                    port_val = int(p.read_text().splitlines()[0].strip())
+                except Exception:
+                    port_val = None
+
+        devtools_http = None
+        if port_val:
+            import urllib.request, json as _json
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port_val}/json/version", timeout=1.0) as r:
+                    devtools_http = _json.loads(r.read().decode("utf-8"))
+            except Exception:
+                devtools_http = {"ok": False}
+
+        diag_summary = collect_diagnostics(DRIVER, None, cfg)  # string
+        diagnostics = {
+            "summary": diag_summary,
+            "driver_initialized": bool(DRIVER),
+            "debugger": f"{DEBUGGER_HOST}:{DEBUGGER_PORT}" if (DEBUGGER_HOST and DEBUGGER_PORT) else None,
+            "devtools_active_port_file": {"path": port_file, "port": port_val, "exists": port_val is not None},
+            "devtools_http_version": devtools_http,
+        }
+
+        snapshot = (_make_page_snapshot()
+                    if DRIVER
+                    else {"url": None, "title": None, "html": "", "truncated": False})
+        return json.dumps({"ok": True, "diagnostics": diagnostics, "snapshot": snapshot})
+    except Exception as e:
+
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": {"summary": diag}})
+
+async def debug_element(
+    selector,
+    selector_type,
+    timeout,
+    iframe_selector,
+    iframe_selector_type,
+    shadow_root_selector,
+    shadow_root_selector_type,
+):
+    try:
+
+        info: Dict[str, Any] = {
+            "selector": selector,
+            "selector_type": selector_type,
+            "exists": False,
+            "displayed": None,
+            "enabled": None,
+            "clickable": None,
+            "rect": None,
+            "outerHTML": None,
+            "notes": [],
+        }
+
+        try:
+            el = retry_op(lambda: find_element(
+                DRIVER,
+                selector,
+                selector_type,
+                timeout=int(timeout),
+                visible_only=False,
+                iframe_selector=iframe_selector,
+                iframe_selector_type=iframe_selector_type,
+                shadow_root_selector=shadow_root_selector,
+                shadow_root_selector_type=shadow_root_selector_type,
+                stay_in_context=True,
+            ))
+            info["exists"] = True
+
+            try:
+                info["displayed"] = bool(el.is_displayed())
+            except Exception:
+                info["displayed"] = None
+            try:
+                info["enabled"] = bool(el.is_enabled())
+            except Exception:
+                info["enabled"] = None
+
+            try:
+                _wait_clickable_element(el, timeout=timeout)
+                info["clickable"] = True
+            except Exception:
+                info["clickable"] = False
+
+            try:
+                r = el.rect
+                info["rect"] = {
+                    "x": r.get("x"),
+                    "y": r.get("y"),
+                    "width": r.get("width"),
+                    "height": r.get("height"),
+                }
+            except Exception:
+                info["rect"] = None
+
+            try:
+                html = DRIVER.execute_script("return arguments[0].outerHTML;", el)
+                info["outerHTML"] = html
+            except Exception:
+                info["outerHTML"] = None
+
+        except TimeoutException:
+            info["notes"].append("Element not found within timeout")
+        except Exception as e:
+            info["notes"].append(f"Error while probing element: {repr(e)}")
+
+        snapshot = _make_page_snapshot()
+        return json.dumps({"ok": True, "debug": info, "snapshot": snapshot})
+    except Exception as e:
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        snapshot = _make_page_snapshot()
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+    finally:
+        try:
+            if DRIVER is not None:
+                DRIVER.switch_to.default_content()
+        except Exception:
+            pass
+
+async def unlock_browser():
+    owner = ensure_process_tag()
+    released = _release_action_lock(owner)
+    return json.dumps({"ok": True, "released": bool(released)})
+
+async def close_browser() -> str:
+    try:
+        closed = close_singleton_window()
+        msg = "Browser window closed successfully" if closed else "No window to close"
+        return json.dumps({"ok": True, "closed": bool(closed), "message": msg})
+    except Exception as e:
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag})
+#endregion

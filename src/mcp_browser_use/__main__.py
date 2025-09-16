@@ -1,4 +1,30 @@
-#begin Overview
+"""
+## Known Limitation: Iframe Context
+
+Multi-step iframe interactions require specifying iframe_selector for each action.
+This is intentional design to prevent context state bugs.
+
+## Performance Considerations
+
+We do not mind additional overhead from validations. The most important thing is that the code is robust.
+
+## Tip for Debugging
+
+Do you find any obvious errors in the code? Please do rubber duck 
+debugging. Imagine you are the first agent that establishes a 
+connection. You connect and want to navigate. You call the function 
+to go to a website, but probably receive an error, because you have
+to open the browser first. Or do you not receive and error and the
+MCP server automatically opens a browser? That would also be fine.
+Then you open the browse, if not open yet. Then you click 
+around a bit. Then another agent 
+establishes a separate MCP server connection and does the same. 
+Then the first agent is done with his work and closes the connection. 
+The second continues working. In this rubber duck 
+journey, is there anything that does not work well?
+"""
+
+#region Overview
 """
 The MCP should allow multiple browser windows to be opened. Each AI agent can call the "start_browser" tool. If the browser is not open at all, it is opened, using the specified persistent user profile. If a browser is already open, so if the second agent calls "start_browser", a new window is opened. Each agent only uses their own window. The windows are identified by tags.
 
@@ -6,6 +32,18 @@ When an agent performs an action, the browser should be briefly locked until 10 
 
 The MCP returns a cleaned HTML version of the page after each action, so the agent can see what changed and what it can do to further interact with the page or find information from the page.
 
+## How Multiple Agents are Handled
+
+We do not manage multiple sessions in one MCP connection. 
+
+While each agent will connect to this very same mcp_browser_use code, 
+they will still connect independently. They can start and stop their MCP server
+connections at will without affecting the functioning of the browser. The 
+agents are agnostic to whether other agents are currently running.
+The MCP for browser use that we develop here should abstract the browser
+handling away from the agents.
+
+When a second agent opens a browser, the agent gets its own browser window. IT MUST NOT USE THE SAME BROWSER WINDOW! The second agent WILL NOT open another browser session.
 
 ## Feature Highlights
 
@@ -16,7 +54,7 @@ The MCP returns a cleaned HTML version of the page after each action, so the age
 """
 #endregion
 
-#begin Required Tools
+#region Required Tools
 """
 ```
 start_browser
@@ -39,7 +77,6 @@ navigate
 >     Navigates the browser to a specified URL.
 >
 >    Args:
->        session_id (str): The ID of the browser session.
 >        url (str): The URL to navigate to.
 >
 >    Returns:
@@ -49,9 +86,11 @@ navigate
 click_element
 ```
 >     Clicks an element on the web page, with iframe and shadow root support.
+>     
+>     Note: For multi-step iframe interactions, specify iframe_selector in each call.
+>     Browser context resets after each action for reliability.
 >
 >     Args:
->        session_id (str): The ID of the browser session.
 >        selector (str): The selector for the element to click.
 >        selector_type (str, optional): The type of selector. Defaults to 'css'.
 >        timeout (int, optional): Maximum wait time for the element to be clickable. Defaults to 10.
@@ -68,14 +107,18 @@ click_element
 fill_text
 ```
 > Input text into an element.
+> 
+> Note: For multi-step iframe interactions, specify iframe_selector in each call.
+> Browser context resets after each action for reliability.
 >
 >     Args:
->         session_id: Session ID of the browser
 >         selector: CSS selector, XPath, or ID of the input field
 >         text: Text to enter into the field
 >         selector_type: Type of selector (css, xpath, id)
 >         clear_first: Whether to clear the field before entering text
 >         timeout: Maximum time to wait for the element in seconds
+>         iframe_selector: Selector for the iframe (if element is inside iframe)
+>         iframe_selector_type: Selector type for the iframe
 
 ```
 send_keys
@@ -83,7 +126,6 @@ send_keys
 > Send keyboard keys to the browser.
 > 
 >     Args:
->         session_id: Session ID of the browser
 >         key: Key to send (e.g., ENTER, TAB, etc.)
 >         selector: CSS selector, XPath, or ID of the element to send keys to (optional)
 >         selector_type: Type of selector (css, xpath, id)
@@ -94,7 +136,6 @@ scroll
 > Scroll the page.
 > 
 >     Args:
->         session_id: Session ID of the browser
 >         x: Horizontal scroll amount in pixels
 >         y: Vertical scroll amount in pixels
 
@@ -104,7 +145,6 @@ take_screenshot
 > Take a screenshot of the current page.
 > 
 >     Args:
->         session_id: Session ID of the browser
 >         screenshot_path: Optional path to save screenshot file
 
 
@@ -113,8 +153,7 @@ close_browser
 ```
 > Close a browser session.
 > 
->     Args:
->         session_id: Session ID of the browser to close
+
 
 ```
 wait_for_element
@@ -122,7 +161,6 @@ wait_for_element
 > Wait for an element to be present, visible, or clickable.
 > 
 >     Args:
->         session_id: Session ID of the browser
 >         selector: CSS selector, XPath, or ID of the element
 >         selector_type: Type of selector (css, xpath, id)
 >         timeout: Maximum time to wait in seconds
@@ -135,7 +173,6 @@ read_chromedriver_log
 >     Fetch the first N lines of the Chromedriver log for debugging.
 >
 >    Args:
->        session_id (str): Browser session ID.
 >        lines (int): Number of lines to return from the top of the log.
 
 
@@ -143,7 +180,7 @@ read_chromedriver_log
 get_debug_info
 ```
 > Return user-data dir, profile name, full profile path, Chrome binary path,
-> browser/driver/Selenium versions – everything we need for debugging.
+> browser/driver/Selenium versions -- everything we need for debugging.
 
 
 
@@ -152,67 +189,37 @@ debug_element
 ```
 > Debug why an element might not be clickable or visible.
 > 
+> Note: For iframe elements, specify iframe_selector to debug within iframe context.
+> 
 >     Args:
->         session_id: Session ID of the browser
 >         selector: CSS selector, XPath, or ID of the element
 >         selector_type: Type of selector (css, xpath, id)
+>         iframe_selector: Selector for the iframe (if element is inside iframe)
+>         iframe_selector_type: Selector type for the iframe
 
 ```
 """
 #endregion
 
-# mcp_browser_use/__main__.py
-# main.py (patched snippet)
-
-
-
-import json
+#region Imports
 import logging
-import os
-import tempfile
-import time
-import traceback
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 from mcp.server.fastmcp import FastMCP
-from selenium.common.exceptions import (
-    ElementClickInterceptedException,
-    StaleElementReferenceException,
-    TimeoutException,
+#endregion 
+
+#region Import from your package __init__.py
+import mcp_browser_use as MBU
+from mcp_browser_use.decorators import (
+    tool_envelope, 
+    exclusive_browser_access,
+    ensure_driver_ready,
 )
-from selenium.webdriver.support.ui import WebDriverWait
+#endregion
 
-# Import from your package __init__.py
-from mcp_browser_use.helpers import (
-    ACTION_LOCK_TTL_SECS,
-
-    INTRA_PROCESS_LOCK,
-    DRIVER,
-    DEBUGGER_HOST,
-    DEBUGGER_PORT,
-
-    # session/process/window management
-    ensure_process_tag,
-    _ensure_driver_and_window,
-    _wait_document_ready,
-    _make_page_snapshot,
-    _wait_clickable_element,
-    close_singleton_window,
-
-    # locking
-    _acquire_action_lock_or_error,
-    _renew_action_lock,
-    _release_action_lock,
-
-    # DOM utils and diagnostics
-    retry_op,
-    find_element,
-    get_cleaned_html,
-    collect_diagnostics,
-    get_env_config,
-)
-
+#region Logger
 logger = logging.getLogger(__name__)
+logger.warning(f"mcp_browser_use from: {getattr(MBU, '__file__', '<namespace>')}")
+#endregion
 
 #region FastMCP Initialization
 mcp = FastMCP("mcp_browser_use")
@@ -220,66 +227,26 @@ mcp = FastMCP("mcp_browser_use")
 
 #region Tools -- Navigation
 @mcp.tool()
-async def start_browser() -> str:
-    async with INTRA_PROCESS_LOCK:
-        had_lock = False
-        owner = ensure_process_tag()
-        try:
-            err = _acquire_action_lock_or_error(owner)
-            if err:
-                return err
-            had_lock = True
-
-            _ensure_driver_and_window()
-            _wait_document_ready(timeout=5.0)
-            snapshot = _make_page_snapshot()
-
-            return json.dumps({
-                "ok": True,
-                # Expose the process tag so clients can correlate logs/locks if they want
-                "session_id": owner,
-                "debugger": f"{DEBUGGER_HOST}:{DEBUGGER_PORT}",
-                "lock_ttl_seconds": ACTION_LOCK_TTL_SECS,
-                "snapshot": snapshot,
-            })
-        except Exception as e:
-            diag = collect_diagnostics(DRIVER, e, get_env_config())
-            snapshot = _make_page_snapshot()
-            return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
-        finally:
-            if had_lock:
-                _renew_action_lock(owner)
-@mcp.tool()
-async def navigate(url: str, timeout: float = 30.0) -> str:
-    async with INTRA_PROCESS_LOCK:
-        had_lock = False
-        owner = ensure_process_tag()
-        try:
-            if not url:
-                snapshot = _make_page_snapshot()
-                return json.dumps({"ok": False, "error": "invalid_url", "snapshot": snapshot})
-
-            err = _acquire_action_lock_or_error(owner)
-            if err:
-                return err
-            had_lock = True
-
-            _ensure_driver_and_window()
-            DRIVER.get(url)
-            _wait_document_ready(timeout=min(15.0, float(timeout)))
-
-            snapshot = _make_page_snapshot()
-            return json.dumps({"ok": True, "url": url, "snapshot": snapshot})
-        except Exception as e:
-            diag = collect_diagnostics(DRIVER, e, get_env_config())
-            snapshot = _make_page_snapshot()
-            return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
-        finally:
-            if had_lock:
-                _renew_action_lock(owner)
+@tool_envelope
+@exclusive_browser_access
+async def mcp_browser_use__start_browser() -> str:
+    return await MBU.helpers.start_browser()
 
 @mcp.tool()
-async def fill_text(
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__navigate_to_url(
+    url: str, 
+    timeout: float = 30.0
+) -> str:
+    return await MBU.helpers.navigate_to_url(url=url, timeout=timeout)
+
+@mcp.tool()
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__fill_text(
     selector: str,
     text: str,
     selector_type: str = "css",
@@ -290,55 +257,28 @@ async def fill_text(
     shadow_root_selector: Optional[str] = None,
     shadow_root_selector_type: str = "css",
 ) -> str:
-    async with INTRA_PROCESS_LOCK:
-        had_lock = False
-        owner = ensure_process_tag()
-        try:
-            err = _acquire_action_lock_or_error(owner)
-            if err:
-                return err
-            had_lock = True
+    snapshot = await MBU.helpers.fill_text(
+        selector=selector,
+        text=text,
+        selector_type=selector_type,
+        clear_first=clear_first,
+        timeout=timeout,
+        iframe_selector=iframe_selector,
+        iframe_selector_type=iframe_selector_type,
+        shadow_root_selector=shadow_root_selector,
+        shadow_root_selector_type=shadow_root_selector_type,
+    )
 
-            _ensure_driver_and_window()
+    if not isinstance(snapshot, str):
+        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
 
-            el = retry_op(lambda: find_element(
-                DRIVER,
-                selector,
-                selector_type,
-                timeout=int(timeout),
-                visible_only=True,
-                iframe_selector=iframe_selector,
-                iframe_selector_type=iframe_selector_type,
-                shadow_root_selector=shadow_root_selector,
-                shadow_root_selector_type=shadow_root_selector_type,
-                stay_in_context=True,
-            ))
-
-            if clear_first:
-                try:
-                    el.clear()
-                except Exception:
-                    pass
-            el.send_keys(text)
-            _wait_document_ready(timeout=5.0)
-
-            snapshot = _make_page_snapshot()
-            return json.dumps({"ok": True, "action": "fill_text", "selector": selector, "snapshot": snapshot})
-        except Exception as e:
-            diag = collect_diagnostics(DRIVER, e, get_env_config())
-            snapshot = _make_page_snapshot()
-            return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
-        finally:
-            try:
-                if DRIVER is not None:
-                    DRIVER.switch_to.default_content()
-            except Exception:
-                pass
-            if had_lock:
-                _renew_action_lock(owner)
+    return snapshot
 
 @mcp.tool()
-async def click_element(
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__click_element(
     selector: str,
     selector_type: str = "css",
     timeout: float = 10.0,
@@ -348,121 +288,47 @@ async def click_element(
     shadow_root_selector: Optional[str] = None,
     shadow_root_selector_type: str = "css",
 ) -> str:
-    async with INTRA_PROCESS_LOCK:
-        had_lock = False
-        owner = ensure_process_tag()
-        try:
-            err = _acquire_action_lock_or_error(owner)
-            if err:
-                return err
-            had_lock = True
+    snapshot = await MBU.helpers.click_element(
+        selector=selector,
+        selector_type=selector_type,
+        timeout=timeout,
+        force_js=force_js,
+        iframe_selector=iframe_selector,
+        iframe_selector_type=iframe_selector_type,
+        shadow_root_selector=shadow_root_selector,
+        shadow_root_selector_type=shadow_root_selector_type,
+    )
 
-            _ensure_driver_and_window()
-
-            el = retry_op(lambda: find_element(
-                DRIVER,
-                selector,
-                selector_type,
-                timeout=int(timeout),
-                visible_only=True,
-                iframe_selector=iframe_selector,
-                iframe_selector_type=iframe_selector_type,
-                shadow_root_selector=shadow_root_selector,
-                shadow_root_selector_type=shadow_root_selector_type,
-                stay_in_context=True,
-            ))
-
-            _wait_clickable_element(el, timeout=timeout)
-
-            if force_js:
-                DRIVER.execute_script("arguments[0].click();", el)
-            else:
-                try:
-                    el.click()
-                except (ElementClickInterceptedException, StaleElementReferenceException):
-                    DRIVER.execute_script("arguments[0].click();", el)
-
-            _wait_document_ready(timeout=10.0)
-
-            snapshot = _make_page_snapshot()
-            return json.dumps({
-                "ok": True,
-                "action": "click",
-                "selector": selector,
-                "selector_type": selector_type,
-                "snapshot": snapshot,
-            })
-        except TimeoutException:
-            snapshot = _make_page_snapshot()
-            return json.dumps({
-                "ok": False,
-                "error": "timeout",
-                "selector": selector,
-                "selector_type": selector_type,
-                "snapshot": snapshot,
-            })
-        except Exception as e:
-            diag = collect_diagnostics(DRIVER, e, get_env_config())
-            snapshot = _make_page_snapshot()
-            return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
-        finally:
-            try:
-                if DRIVER is not None:
-                    DRIVER.switch_to.default_content()
-            except Exception:
-                pass
-            if had_lock:
-                _renew_action_lock(owner)
+    if not isinstance(snapshot, str):
+        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
+    
+    return  snapshot
 
 @mcp.tool()
-async def take_screenshot(screenshot_path: Optional[str] = None, return_base64: bool = False) -> str:
-    async with INTRA_PROCESS_LOCK:
-        had_lock = False
-        owner = ensure_process_tag()
-        try:
-            err = _acquire_action_lock_or_error(owner)
-            if err:
-                return err
-            had_lock = True
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__take_screenshot(screenshot_path: Optional[str] = None, return_base64: bool = False, return_snapshot: bool = False) -> str:
+    snapshot = await MBU.helpers.take_screenshot(screenshot_path=screenshot_path, return_base64=return_base64, return_snapshot=return_snapshot)
 
-            _ensure_driver_and_window()
-
-            png_b64 = DRIVER.get_screenshot_as_base64()
-            if screenshot_path:
-                with open(screenshot_path, "wb") as f:
-                    f.write(DRIVER.get_screenshot_as_png())
-            payload = {"ok": True, "saved_to": screenshot_path}
-            if return_base64:
-                payload["base64"] = png_b64
-            payload["snapshot"] = _make_page_snapshot()
-            return json.dumps(payload)
-        except Exception as e:
-            diag = collect_diagnostics(DRIVER, e, get_env_config())
-            snapshot = _make_page_snapshot()
-            return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
-        finally:
-            if had_lock:
-                _renew_action_lock(owner)
+    if not isinstance(snapshot, str):
+        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
+    
+    return snapshot
 #endregion
 
 #region Tools -- Debugging
 @mcp.tool()
-async def get_debug_diagnostics_info() -> str:
-    async with INTRA_PROCESS_LOCK:
-        if DRIVER is None:
-            return json.dumps({"ok": False, "error": "driver_not_initialized"})
-        try:
-            info = collect_diagnostics(DRIVER, None, get_env_config())
-            snapshot = _make_page_snapshot()
-            return json.dumps({"ok": True, "diagnostics": info, "snapshot": snapshot})
-        except Exception as e:
-            diag = collect_diagnostics(DRIVER, e, get_env_config())
-            snapshot = _make_page_snapshot()
-            return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
-
-
+@tool_envelope
+async def mcp_browser_use__get_debug_diagnostics_info() -> str:
+    diagnostics = await MBU.helpers.get_debug_diagnostics_info()
+    return diagnostics
+        
 @mcp.tool()
-async def debug_element(
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__debug_element(
     selector: str,
     selector_type: str = "css",
     timeout: float = 10.0,
@@ -471,122 +337,33 @@ async def debug_element(
     shadow_root_selector: Optional[str] = None,
     shadow_root_selector_type: str = "css",
 ) -> str:
-    async with INTRA_PROCESS_LOCK:
-        had_lock = False
-        owner = ensure_process_tag()
-        try:
-            err = _acquire_action_lock_or_error(owner)
-            if err:
-                return err
-            had_lock = True
-
-            _ensure_driver_and_window()
-
-            info: Dict[str, Any] = {
-                "selector": selector,
-                "selector_type": selector_type,
-                "exists": False,
-                "displayed": None,
-                "enabled": None,
-                "clickable": None,
-                "rect": None,
-                "outerHTML": None,
-                "notes": [],
-            }
-
-            try:
-                el = retry_op(lambda: find_element(
-                    DRIVER,
-                    selector,
-                    selector_type,
-                    timeout=int(timeout),
-                    visible_only=False,
-                    iframe_selector=iframe_selector,
-                    iframe_selector_type=iframe_selector_type,
-                    shadow_root_selector=shadow_root_selector,
-                    shadow_root_selector_type=shadow_root_selector_type,
-                    stay_in_context=True,
-                ))
-                info["exists"] = True
-
-                try:
-                    info["displayed"] = bool(el.is_displayed())
-                except Exception:
-                    info["displayed"] = None
-                try:
-                    info["enabled"] = bool(el.is_enabled())
-                except Exception:
-                    info["enabled"] = None
-
-                try:
-                    _wait_clickable_element(el, timeout=timeout)
-                    info["clickable"] = True
-                except Exception:
-                    info["clickable"] = False
-
-                try:
-                    r = el.rect
-                    info["rect"] = {
-                        "x": r.get("x"),
-                        "y": r.get("y"),
-                        "width": r.get("width"),
-                        "height": r.get("height"),
-                    }
-                except Exception:
-                    info["rect"] = None
-
-                try:
-                    html = DRIVER.execute_script("return arguments[0].outerHTML;", el)
-                    info["outerHTML"] = html
-                except Exception:
-                    info["outerHTML"] = None
-
-            except TimeoutException:
-                info["notes"].append("Element not found within timeout")
-            except Exception as e:
-                info["notes"].append(f"Error while probing element: {repr(e)}")
-
-            snapshot = _make_page_snapshot()
-            return json.dumps({"ok": True, "debug": info, "snapshot": snapshot})
-        except Exception as e:
-            diag = collect_diagnostics(DRIVER, e, get_env_config())
-            snapshot = _make_page_snapshot()
-            return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
-        finally:
-            try:
-                if DRIVER is not None:
-                    DRIVER.switch_to.default_content()
-            except Exception:
-                pass
-            if had_lock:
-                _renew_action_lock(owner)
+    debug_info = await MBU.helpers.debug_element(
+        selector=selector,
+        selector_type=selector_type,
+        timeout=timeout,
+        iframe_selector=iframe_selector,
+        iframe_selector_type=iframe_selector_type,
+        shadow_root_selector=shadow_root_selector,
+        shadow_root_selector_type=shadow_root_selector_type,
+    )
+    return debug_info
 #endregion
 
 #region Tools -- Session management
 @mcp.tool()
-async def unlock_browser() -> str:
-    async with INTRA_PROCESS_LOCK:
-        owner = ensure_process_tag()
-        released = _release_action_lock(owner)
-        return json.dumps({"ok": True, "released": bool(released)})
+@tool_envelope
+@exclusive_browser_access
+async def mcp_browser_use__unlock_browser() -> str:
+    unlock_browser_info = await MBU.helpers.unlock_browser()
+    return unlock_browser_info
 
 @mcp.tool()
-async def close_browser() -> str:
-    async with INTRA_PROCESS_LOCK:
-        had_lock = False
-        owner = ensure_process_tag()
-        try:
-            err = _acquire_action_lock_or_error(owner)
-            if err:
-                return err
-            had_lock = True
-
-            closed = close_singleton_window()
-            return json.dumps({"ok": True, "closed": bool(closed)})
-        except Exception as e:
-            diag = collect_diagnostics(DRIVER, e, get_env_config())
-            return json.dumps({"ok": False, "error": str(e), "diagnostics": diag})
-        finally:
-            if had_lock:
-                _renew_action_lock(owner)
+@tool_envelope
+@exclusive_browser_access
+async def mcp_browser_use__close_browser() -> str:
+    close_browser_info = await MBU.helpers.close_browser()
+    return close_browser_info
 #endregion
+
+if __name__ == "__main__":
+    mcp.run()

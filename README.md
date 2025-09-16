@@ -25,8 +25,17 @@ _This makes the handling of multiple agents seamless: Just start as many agents 
 * **HTML Truncation:** The MCP allows you to configure truncation of the HTML pages. Other scraping MCPs may overwhelm the AI with accessibility snapshots or HTML dumps that are larger than the context window. This MCP will help you to manage the maximum page size by setting the `MCP_MAX_SNAPSHOT_CHARS` environment variable.
 * **Multiple Browser Windows and Multiple Agents:** You can connect multiple agents to this MCP independently, without requiring coordination on behalf of the agents. Each agent can work with **the same** browser profile, which is helpful when logins should persist across agents. Each agent gets their own browser window, so they do not interfere with each other. Uses Chrome DevTools Protocol TargetId to identify browser windows.
 
+## Known Limitations
 
-## How to Use This MCP
+* **Iframe Context:** Multi-step interactions within iframes require specifying `iframe_selector` for each action. Browser context resets after each tool call for reliability. For iframe workflows, repeat the iframe selector parameter in each `click_element`, `fill_text`, or `debug_element` call.
+
+## Configuration / Installation
+
+* We recommend using Chrome Canary or Chrome Beta. This will ensure that your AI agents will not interfere with your Chrome instance. While this MCP can handle an arbitrary number of agents to use a single Chrome executable, the MCP does require the instance to be started in developer mode. If you, as a normal human user, start your normal Chrome instance manually, the Chrome instance **won't be in developer mode**. This is a problem. Thus, allow you to use your Chrome browser normally, please just install Chrome Beta (recommended) or Chrome Canary (not recommended due to instability).
+* After installing Chrome Beta, point to the Chrome Beta executable in the `.env` file as described below.
+* Start the MCP server (if you do not know how to do this, check the section "How to Use (This) MCP below).
+
+## How to Use (This) MCP
 
 Please refer to the [MCP documentation on modelcontextprotocol.io](https://modelcontextprotocol.io/quickstart/user).
 
@@ -74,9 +83,32 @@ MCP_MAX_SNAPSHOT_CHARS=10000
 ## Available Tools
 
 
+## Debugging
+
+Check if the browser is running by visiting this URL in your main browser (not the automated browser):
+
+```
+http://127.0.0.1:9223/json/version
+```
+
+It will display something like this if the browser is running:
+
+```
+{
+   "Browser": "Chrome/140.0.7339.24",
+   "Protocol-Version": "1.3",
+   "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+   "V8-Version": "14.0.365.3",
+   "WebKit-Version": "537.36 (@f8765868e23d9ee5209061fc999f6495c525cd13)",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9223/devtools/browser/d8f511eb-947c-4eb1-833d-917212a92394"
+}
+```
+
 ## Demo Video (YouTube)
 
 [![Quick demo](https://img.youtube.com/vi/20B8trurlsI/hqdefault.jpg)](https://www.youtube.com/watch?v=20B8trurlsI)
+
+
 
 ## Run Tests
 

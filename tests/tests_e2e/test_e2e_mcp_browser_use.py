@@ -17,9 +17,8 @@ def load_env():
     """
     load_dotenv()
 
-##
 ## We DO NOT want to use pytest-asyncio.
-##
+## Instead, use event_loop.run_until_complete()!
 
 @pytest.fixture
 def config_file():
@@ -31,7 +30,7 @@ logger:
     progress_display: false
     show_chat: false
     show_tools: true
-    truncate_tools: true
+    truncate_tools: false
 
 mcp:
     servers:

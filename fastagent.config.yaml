@@ -10,8 +10,9 @@
 # If not specified, defaults to "haiku".
 # Can be overriden with a command line switch --model=<model>, or within the Agent constructor.
 
-# default_model: haiku
-default_model: gpt-4o
+default_model: haiku
+# default_model: gpt-5-nano
+# default_model: gemini-2.5-flash-lite
 
 # Logging and Console Configuration:
 logger:
@@ -28,7 +29,7 @@ logger:
     # Show tool calls on the console
     show_tools: true
     # Truncate long tool responses on the console
-    truncate_tools: true
+    truncate_tools: false
 
 # MCP Servers
 mcp:

@@ -2,7 +2,7 @@
     "mcpServers": {
         "mcp_browser_use": {
             "type": "stdio",
-            "command": "/Users/janspoerer/code/agents/mcp_browser_use/.venv/bin/python",
+            "command": "C:\\Users\\j.spoerer\\code\\scraping\\mcp_browser_use\\.venv\\Scripts\\python.exe",
             "args": [
                 "-m",
                 "mcp_browser_use"

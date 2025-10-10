@@ -365,5 +365,167 @@ async def mcp_browser_use__close_browser() -> str:
     return close_browser_info
 #endregion
 
+#region Tools -- Page interaction
+@mcp.tool()
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__scroll(x: int = 0, y: int = 0) -> str:
+    """
+    Scroll the page by the specified pixel amounts.
+
+    Args:
+        x: Horizontal scroll amount in pixels (positive = right, negative = left)
+        y: Vertical scroll amount in pixels (positive = down, negative = up)
+    """
+    snapshot = await MBU.helpers.scroll(x=x, y=y)
+
+    if not isinstance(snapshot, str):
+        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
+
+    return snapshot
+
+@mcp.tool()
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__send_keys(
+    key: str,
+    selector: Optional[str] = None,
+    selector_type: str = "css",
+    timeout: float = 10.0,
+) -> str:
+    """
+    Send keyboard keys to an element or to the active element.
+
+    Args:
+        key: Key to send (ENTER, TAB, ESCAPE, ARROW_DOWN, etc.)
+        selector: Optional CSS selector, XPath, or ID of element to send keys to
+        selector_type: Type of selector (css, xpath, id)
+        timeout: Maximum time to wait for element in seconds
+    """
+    snapshot = await MBU.helpers.send_keys(
+        key=key,
+        selector=selector,
+        selector_type=selector_type,
+        timeout=timeout,
+    )
+
+    if not isinstance(snapshot, str):
+        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
+
+    return snapshot
+
+@mcp.tool()
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__wait_for_element(
+    selector: str,
+    selector_type: str = "css",
+    timeout: float = 10.0,
+    condition: str = "visible",
+    iframe_selector: Optional[str] = None,
+    iframe_selector_type: str = "css",
+) -> str:
+    """
+    Wait for an element to meet a specific condition.
+
+    Args:
+        selector: CSS selector, XPath, or ID of the element
+        selector_type: Type of selector (css, xpath, id)
+        timeout: Maximum time to wait in seconds
+        condition: Condition to wait for - 'present', 'visible', or 'clickable'
+        iframe_selector: Optional selector for iframe containing the element
+        iframe_selector_type: Selector type for the iframe
+    """
+    snapshot = await MBU.helpers.wait_for_element(
+        selector=selector,
+        selector_type=selector_type,
+        timeout=timeout,
+        condition=condition,
+        iframe_selector=iframe_selector,
+        iframe_selector_type=iframe_selector_type,
+    )
+
+    if not isinstance(snapshot, str):
+        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
+
+    return snapshot
+#endregion
+
+#region Tools -- Cookie management
+@mcp.tool()
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__get_cookies() -> str:
+    """Get all cookies for the current page/domain."""
+    snapshot = await MBU.helpers.get_cookies()
+
+    if not isinstance(snapshot, str):
+        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
+
+    return snapshot
+
+@mcp.tool()
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__add_cookie(
+    name: str,
+    value: str,
+    domain: Optional[str] = None,
+    path: str = "/",
+    secure: bool = False,
+    http_only: bool = False,
+    expiry: Optional[int] = None,
+) -> str:
+    """
+    Add a cookie to the browser.
+
+    Args:
+        name: Cookie name
+        value: Cookie value
+        domain: Optional domain for the cookie (defaults to current domain)
+        path: Cookie path (default: "/")
+        secure: Whether cookie should only be sent over HTTPS
+        http_only: Whether cookie should be HTTP-only
+        expiry: Optional expiry timestamp (Unix epoch seconds)
+    """
+    snapshot = await MBU.helpers.add_cookie(
+        name=name,
+        value=value,
+        domain=domain,
+        path=path,
+        secure=secure,
+        http_only=http_only,
+        expiry=expiry,
+    )
+
+    if not isinstance(snapshot, str):
+        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
+
+    return snapshot
+
+@mcp.tool()
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__delete_cookie(name: str) -> str:
+    """
+    Delete a specific cookie by name.
+
+    Args:
+        name: Name of the cookie to delete
+    """
+    snapshot = await MBU.helpers.delete_cookie(name=name)
+
+    if not isinstance(snapshot, str):
+        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
+
+    return snapshot
+#endregion
+
 if __name__ == "__main__":
     mcp.run()

@@ -308,12 +308,32 @@ async def mcp_browser_use__click_element(
 @tool_envelope
 @exclusive_browser_access
 @ensure_driver_ready
-async def mcp_browser_use__take_screenshot(screenshot_path: Optional[str] = None, return_base64: bool = False, return_snapshot: bool = False) -> str:
-    snapshot = await MBU.helpers.take_screenshot(screenshot_path=screenshot_path, return_base64=return_base64, return_snapshot=return_snapshot)
+async def mcp_browser_use__take_screenshot(
+    screenshot_path: Optional[str] = None,
+    return_base64: bool = False,
+    return_snapshot: bool = False,
+    thumbnail_width: Optional[int] = None,
+) -> str:
+    """
+    Take a screenshot of the current page.
+
+    Args:
+        screenshot_path: Optional path to save the full screenshot
+        return_base64: Whether to return base64 encoded thumbnail (default: False)
+        return_snapshot: Whether to return page HTML snapshot (default: False)
+        thumbnail_width: Optional width in pixels for thumbnail (default: 400px if return_base64=True)
+                        Minimum: 50px. Only used when return_base64=True.
+    """
+    snapshot = await MBU.helpers.take_screenshot(
+        screenshot_path=screenshot_path,
+        return_base64=return_base64,
+        return_snapshot=return_snapshot,
+        thumbnail_width=thumbnail_width,
+    )
 
     if not isinstance(snapshot, str):
         raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
-    
+
     return snapshot
 #endregion
 
@@ -336,7 +356,23 @@ async def mcp_browser_use__debug_element(
     iframe_selector_type: str = "css",
     shadow_root_selector: Optional[str] = None,
     shadow_root_selector_type: str = "css",
+    max_html_length: int = 5000,
+    include_html: bool = True,
 ) -> str:
+    """
+    Debug an element on the page.
+
+    Args:
+        selector: CSS selector, XPath, or ID of the element
+        selector_type: Type of selector (css, xpath, id)
+        timeout: Maximum time to wait for element
+        iframe_selector: Optional iframe selector
+        iframe_selector_type: Iframe selector type
+        shadow_root_selector: Optional shadow root selector
+        shadow_root_selector_type: Shadow root selector type
+        max_html_length: Maximum length of outerHTML to return (default: 5000 chars)
+        include_html: Whether to include HTML in response (default: True)
+    """
     debug_info = await MBU.helpers.debug_element(
         selector=selector,
         selector_type=selector_type,
@@ -345,6 +381,8 @@ async def mcp_browser_use__debug_element(
         iframe_selector_type=iframe_selector_type,
         shadow_root_selector=shadow_root_selector,
         shadow_root_selector_type=shadow_root_selector_type,
+        max_html_length=max_html_length,
+        include_html=include_html,
     )
     return debug_info
 #endregion

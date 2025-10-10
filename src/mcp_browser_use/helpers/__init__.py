@@ -61,6 +61,8 @@ import urllib.request
 from pathlib import Path
 from bs4 import BeautifulSoup
 from typing import Callable, Optional, Tuple, Dict, Any
+import io
+import base64
 
 import logging
 logger = logging.getLogger(__name__)
@@ -211,7 +213,7 @@ ACTION_LOCK_WAIT_SECS = int(os.getenv("MCP_ACTION_LOCK_WAIT", "60"))
 FILE_MUTEX_STALE_SECS = int(os.getenv("MCP_FILE_MUTEX_STALE_SECS", "60"))
 
 # Truncation
-MAX_SNAPSHOT_CHARS = int(os.getenv("MCP_MAX_SNAPSHOT_CHARS", "0"))
+MAX_SNAPSHOT_CHARS = int(os.getenv("MCP_MAX_SNAPSHOT_CHARS", "10000"))
 #endregion
 
 #region Lock
@@ -1813,17 +1815,91 @@ async def click_element(
         except Exception:
             pass
 
-async def take_screenshot(screenshot_path, return_base64, return_snapshot) -> str:
-    try:
+async def take_screenshot(screenshot_path, return_base64, return_snapshot, thumbnail_width=None) -> str:
+    """
+    Take a screenshot of the current page.
 
-        png_b64 = DRIVER.get_screenshot_as_base64()
+    Args:
+        screenshot_path: Optional path to save the full screenshot
+        return_base64: Whether to return base64 encoded image
+        return_snapshot: Whether to return page HTML snapshot
+        thumbnail_width: Optional width in pixels for thumbnail (requires return_base64=True)
+                        Default: 400px if return_base64 is True
+
+    Returns:
+        JSON string with ok status, saved path, optional base64 thumbnail, and snapshot
+    """
+    try:
+        if DRIVER is None:
+            return json.dumps({"ok": False, "error": "driver_not_initialized"})
+
+        # Get full screenshot
+        png_bytes = DRIVER.get_screenshot_as_png()
+
+        # Save full screenshot to disk if path provided
         if screenshot_path:
             with open(screenshot_path, "wb") as f:
-                f.write(DRIVER.get_screenshot_as_png())
+                f.write(png_bytes)
+
         payload = {"ok": True, "saved_to": screenshot_path}
+
+        # Handle base64 return with thumbnail
         if return_base64:
-            payload["base64"] = png_b64
-        
+            # Default thumbnail width to 400px if base64 is requested
+            if thumbnail_width is None:
+                thumbnail_width = 400
+
+            # Validate thumbnail width
+            if thumbnail_width < 50:
+                return json.dumps({
+                    "ok": False,
+                    "error": "thumbnail_width_too_small",
+                    "message": "thumbnail_width must be at least 50 pixels",
+                    "min_width": 50,
+                })
+
+            try:
+                from PIL import Image
+            except ImportError:
+                return json.dumps({
+                    "ok": False,
+                    "error": "pillow_not_installed",
+                    "message": "Pillow is required for thumbnails. Install with: pip install Pillow",
+                })
+
+            try:
+                # Create thumbnail
+                img = Image.open(io.BytesIO(png_bytes))
+                original_size = img.size
+
+                # Calculate thumbnail dimensions maintaining aspect ratio
+                aspect_ratio = img.height / img.width
+                thumb_height = int(thumbnail_width * aspect_ratio)
+
+                # Resize to thumbnail
+                img.thumbnail((thumbnail_width, thumb_height), Image.Resampling.LANCZOS)
+
+                # Encode thumbnail to base64
+                thumb_buffer = io.BytesIO()
+                img.save(thumb_buffer, format='PNG', optimize=True)
+                thumb_b64 = base64.b64encode(thumb_buffer.getvalue()).decode('utf-8')
+
+                payload["base64"] = thumb_b64
+                payload["thumbnail_width"] = thumbnail_width
+                payload["thumbnail_height"] = img.height
+                payload["original_width"] = original_size[0]
+                payload["original_height"] = original_size[1]
+                payload["message"] = f"Screenshot saved (thumbnail: {thumbnail_width}x{img.height}px, original: {original_size[0]}x{original_size[1]}px)"
+
+            except Exception as thumb_error:
+                # Thumbnail failed but full screenshot was saved
+                return json.dumps({
+                    "ok": True,
+                    "saved_to": screenshot_path,
+                    "thumbnail_error": str(thumb_error),
+                    "message": "Full screenshot saved, but thumbnail generation failed"
+                })
+
         if return_snapshot:
             payload["snapshot"] = _make_page_snapshot()
         else:
@@ -1889,9 +1965,27 @@ async def debug_element(
     iframe_selector_type,
     shadow_root_selector,
     shadow_root_selector_type,
+    max_html_length=5000,
+    include_html=True,
 ):
-    try:
+    """
+    Debug an element on the page.
 
+    Args:
+        selector: CSS selector, XPath, or ID of the element
+        selector_type: Type of selector (css, xpath, id)
+        timeout: Maximum time to wait for element
+        iframe_selector: Optional iframe selector
+        iframe_selector_type: Iframe selector type
+        shadow_root_selector: Optional shadow root selector
+        shadow_root_selector_type: Shadow root selector type
+        max_html_length: Maximum length of outerHTML to return (default: 5000 chars)
+        include_html: Whether to include HTML in response (default: True)
+
+    Returns:
+        JSON string with debug information
+    """
+    try:
         info: Dict[str, Any] = {
             "selector": selector,
             "selector_type": selector_type,
@@ -1901,6 +1995,7 @@ async def debug_element(
             "clickable": None,
             "rect": None,
             "outerHTML": None,
+            "truncated": False,
             "notes": [],
         }
 
@@ -1945,11 +2040,28 @@ async def debug_element(
             except Exception:
                 info["rect"] = None
 
-            try:
-                html = DRIVER.execute_script("return arguments[0].outerHTML;", el)
-                info["outerHTML"] = html
-            except Exception:
-                info["outerHTML"] = None
+            # Get HTML if requested
+            if include_html:
+                try:
+                    html = DRIVER.execute_script("return arguments[0].outerHTML;", el)
+                    # Clean invalid characters
+                    html = html.replace('\x00', '').encode('utf-8', errors='ignore').decode('utf-8')
+
+                    # Truncate if too large
+                    full_length = len(html)
+                    if max_html_length and len(html) > max_html_length:
+                        info["outerHTML"] = html[:max_html_length]
+                        info["truncated"] = True
+                        info["full_html_length"] = full_length
+                        info["notes"].append(f"HTML truncated from {full_length} to {max_html_length} chars")
+                    else:
+                        info["outerHTML"] = html
+                        info["truncated"] = False
+                except Exception as e:
+                    info["outerHTML"] = None
+                    info["notes"].append(f"Could not get HTML: {str(e)}")
+            else:
+                info["notes"].append("HTML omitted (include_html=False)")
 
         except TimeoutException:
             info["notes"].append("Element not found within timeout")

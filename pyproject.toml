@@ -17,6 +17,7 @@ dependencies = [
   "selenium>=4.30.0",
   "psutil",
   "beautifulsoup4",
+  "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]

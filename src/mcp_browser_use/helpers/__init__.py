@@ -199,7 +199,10 @@ ALLOW_ATTACH_ANY = os.getenv("MCP_ATTACH_ANY_PROFILE", "0") == "1"
 TARGET_ID: Optional[str] = None
 WINDOW_ID: Optional[int] = None
 
-LOCK_DIR = os.getenv("MCP_BROWSER_LOCK_DIR") or str(Path(tempfile.gettempdir()) / "mcp_chrome_locks")
+# Lock directory - defaults to tmp/ folder in project root for easy visibility
+# __file__ is src/mcp_browser_use/helpers/__init__.py, so go up to project root
+_DEFAULT_LOCK_DIR = str(Path(__file__).parent.parent.parent.parent / "tmp" / "mcp_locks")
+LOCK_DIR = os.getenv("MCP_BROWSER_LOCK_DIR") or _DEFAULT_LOCK_DIR
 Path(LOCK_DIR).mkdir(parents=True, exist_ok=True)
 
 # Action lock TTL (post-action exclusivity) and wait time
@@ -222,6 +225,7 @@ def get_intra_process_lock() -> asyncio.Lock:
 def _renew_action_lock(owner: str, ttl: int) -> bool:
     """
     Extend the action lock if owned by `owner`, or if stale. No-op if owned by someone else and not stale.
+    Also updates the window registry heartbeat as a piggyback optimization.
     Returns True if we wrote a new expiry.
     """
     softlock_json, softlock_mutex, _ = _lock_paths()
@@ -234,6 +238,13 @@ def _renew_action_lock(owner: str, ttl: int) -> bool:
             if cur_owner == owner or expires_at <= _now():
                 new_exp = _now() + int(ttl)
                 _write_softlock(softlock_json, {"owner": owner, "expires_at": new_exp})
+
+                # Piggyback: update window heartbeat while we're renewing the lock
+                try:
+                    _update_window_heartbeat(owner)
+                except Exception:
+                    pass  # Non-critical
+
                 return True
             return False
     except Exception:
@@ -361,6 +372,99 @@ def _acquire_action_lock_or_error(owner: str) -> Optional[str]:
         "expires_at": res.get("expires_at"),
         "lock_ttl_seconds": ACTION_LOCK_TTL_SECS,
     })
+#endregion
+
+#region Window Registry (tracks which agent owns which browser window)
+WINDOW_REGISTRY_STALE_THRESHOLD = int(os.getenv("MCP_WINDOW_REGISTRY_STALE_SECS", "300"))  # 5 minutes
+
+def _window_registry_path() -> str:
+    """Get path to window registry file for this profile."""
+    key = profile_key(get_env_config())
+    return str(Path(LOCK_DIR) / f"{key}.window_registry.json")
+
+def _read_window_registry() -> Dict[str, Any]:
+    """Read the window registry. Returns empty dict if not found or invalid."""
+    path = _window_registry_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+
+def _write_window_registry(registry: Dict[str, Any]):
+    """Write window registry atomically using temp file + rename."""
+    path = _window_registry_path()
+    tmp = f"{path}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(registry, f, indent=2)
+        os.replace(tmp, path)
+    except Exception:
+        pass  # Non-critical if write fails
+
+def _register_window(agent_id: str, target_id: str, window_id: Optional[int]):
+    """Register a window as owned by this agent."""
+    registry = _read_window_registry()
+    registry[agent_id] = {
+        "target_id": target_id,
+        "window_id": window_id,
+        "pid": os.getpid(),
+        "last_heartbeat": time.time(),
+        "created_at": time.time(),
+    }
+    _write_window_registry(registry)
+
+def _update_window_heartbeat(agent_id: str):
+    """Update the heartbeat timestamp for this agent's window."""
+    registry = _read_window_registry()
+    if agent_id in registry:
+        registry[agent_id]["last_heartbeat"] = time.time()
+        _write_window_registry(registry)
+
+def _unregister_window(agent_id: str):
+    """Remove this agent's window from the registry."""
+    registry = _read_window_registry()
+    if agent_id in registry:
+        del registry[agent_id]
+        _write_window_registry(registry)
+
+def cleanup_orphaned_windows(driver: webdriver.Chrome):
+    """
+    Close windows owned by dead or stale processes.
+    Called during browser startup to clean up windows from crashed agents.
+    """
+    registry = _read_window_registry()
+    now = time.time()
+
+    to_remove = []
+    for agent_id, info in registry.items():
+        pid = info.get("pid")
+        last_hb = info.get("last_heartbeat", 0)
+        target_id = info.get("target_id")
+
+        # Check if process is dead or heartbeat is stale
+        is_dead = pid and not psutil.pid_exists(pid)
+        is_stale = (now - last_hb) > WINDOW_REGISTRY_STALE_THRESHOLD
+
+        if is_dead or is_stale:
+            # Try to close the orphaned window
+            try:
+                driver.execute_cdp_cmd("Target.closeTarget", {"targetId": target_id})
+                logger.info(f"Closed orphaned window: agent={agent_id}, target={target_id}, dead={is_dead}, stale={is_stale}")
+            except Exception as e:
+                logger.debug(f"Could not close orphaned window {target_id}: {e}")
+                pass  # Window might already be closed
+
+            to_remove.append(agent_id)
+
+    # Clean up registry
+    if to_remove:
+        for agent_id in to_remove:
+            del registry[agent_id]
+        _write_window_registry(registry)
+        logger.info(f"Cleaned up {len(to_remove)} orphaned window(s) from registry")
 #endregion
 
 #region Driver & window
@@ -537,7 +641,7 @@ def _ensure_singleton_window(driver: webdriver.Chrome):
         # First validate we're in the correct window context
         if _validate_window_context(driver, TARGET_ID):
             return  # Already in correct window
-            
+
         # Context validation failed - attempt recovery
         h = _handle_for_target(driver, TARGET_ID)
         if h:
@@ -548,13 +652,18 @@ def _ensure_singleton_window(driver: webdriver.Chrome):
                     return
             except Exception:
                 pass  # Recovery failed, will recreate window below
-        
+
         # Window handle not found or recovery failed - clear target and recreate
         TARGET_ID = None
         WINDOW_ID = None
 
     # 1) First-time in this process or recovery failed: create a new real OS window for this agent
     if not TARGET_ID:
+        # Cleanup orphaned windows from dead/stale processes before creating new window
+        try:
+            cleanup_orphaned_windows(driver)
+        except Exception as e:
+            logger.debug(f"Window cleanup failed (non-critical): {e}")
         try:
             win = driver.execute_cdp_cmd("Browser.createWindow", {"state": "normal"})
             if not isinstance(win, dict):
@@ -600,6 +709,13 @@ def _ensure_singleton_window(driver: webdriver.Chrome):
         # Final validation to ensure we're in the correct window
         if not _validate_window_context(driver, TARGET_ID):
             raise RuntimeError(f"Failed to establish correct window context for target {TARGET_ID}")
+
+        # Register this window in the registry
+        try:
+            owner = ensure_process_tag()
+            _register_window(owner, TARGET_ID, WINDOW_ID)
+        except Exception as e:
+            logger.debug(f"Window registration failed (non-critical): {e}")
     else:
         raise RuntimeError(f"Failed to find window handle for target {TARGET_ID}")
 
@@ -714,6 +830,7 @@ def close_singleton_window() -> bool:
     """
     Close the singleton window (by targetId) without quitting Chrome.
     Resets TARGET_ID/WINDOW_ID so a subsequent start will create a new window.
+    Also unregisters the window from the registry.
     """
     global DRIVER, TARGET_ID, WINDOW_ID
     if DRIVER is None or not TARGET_ID:
@@ -733,6 +850,14 @@ def close_singleton_window() -> bool:
                 closed = True
         except Exception:
             pass
+
+    # Unregister from window registry
+    if closed:
+        try:
+            owner = ensure_process_tag()
+            _unregister_window(owner)
+        except Exception as e:
+            logger.debug(f"Window unregistration failed (non-critical): {e}")
 
     TARGET_ID = None
     WINDOW_ID = None
@@ -1857,4 +1982,307 @@ async def close_browser() -> str:
     except Exception as e:
         diag = collect_diagnostics(DRIVER, e, get_env_config())
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag})
+
+async def scroll(x: int, y: int) -> str:
+    """
+    Scroll the page by the specified pixel amounts.
+
+    Args:
+        x: Horizontal scroll amount in pixels (positive = right, negative = left)
+        y: Vertical scroll amount in pixels (positive = down, negative = up)
+
+    Returns:
+        JSON string with ok status, action, scroll amounts, and page snapshot
+    """
+    try:
+        if DRIVER is None:
+            return json.dumps({"ok": False, "error": "driver_not_initialized"})
+
+        DRIVER.execute_script(f"window.scrollBy({int(x)}, {int(y)});")
+        time.sleep(0.3)  # Brief pause to allow scroll to complete
+
+        snapshot = _make_page_snapshot()
+        return json.dumps({
+            "ok": True,
+            "action": "scroll",
+            "x": int(x),
+            "y": int(y),
+            "snapshot": snapshot,
+        })
+    except Exception as e:
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        snapshot = _make_page_snapshot()
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+
+async def send_keys(
+    key: str,
+    selector: Optional[str] = None,
+    selector_type: str = "css",
+    timeout: float = 10.0,
+) -> str:
+    """
+    Send keyboard keys to an element or to the active element.
+
+    Args:
+        key: Key to send (ENTER, TAB, ESCAPE, ARROW_DOWN, etc.)
+        selector: Optional CSS selector, XPath, or ID of element to send keys to
+        selector_type: Type of selector (css, xpath, id)
+        timeout: Maximum time to wait for element in seconds
+
+    Returns:
+        JSON string with ok status, action, key sent, and page snapshot
+    """
+    try:
+        from selenium.webdriver.common.keys import Keys
+
+        if DRIVER is None:
+            return json.dumps({"ok": False, "error": "driver_not_initialized"})
+
+        # Map string key names to Selenium Keys
+        key_mapping = {
+            "ENTER": Keys.ENTER,
+            "RETURN": Keys.RETURN,
+            "TAB": Keys.TAB,
+            "ESCAPE": Keys.ESCAPE,
+            "ESC": Keys.ESCAPE,
+            "SPACE": Keys.SPACE,
+            "BACKSPACE": Keys.BACKSPACE,
+            "DELETE": Keys.DELETE,
+            "ARROW_UP": Keys.ARROW_UP,
+            "ARROW_DOWN": Keys.ARROW_DOWN,
+            "ARROW_LEFT": Keys.ARROW_LEFT,
+            "ARROW_RIGHT": Keys.ARROW_RIGHT,
+            "PAGE_UP": Keys.PAGE_UP,
+            "PAGE_DOWN": Keys.PAGE_DOWN,
+            "HOME": Keys.HOME,
+            "END": Keys.END,
+            "F1": Keys.F1,
+            "F2": Keys.F2,
+            "F3": Keys.F3,
+            "F4": Keys.F4,
+            "F5": Keys.F5,
+            "F6": Keys.F6,
+            "F7": Keys.F7,
+            "F8": Keys.F8,
+            "F9": Keys.F9,
+            "F10": Keys.F10,
+            "F11": Keys.F11,
+            "F12": Keys.F12,
+        }
+
+        selenium_key = key_mapping.get(key.upper(), key)
+
+        if selector:
+            # Send keys to specific element
+            el = retry_op(lambda: find_element(
+                DRIVER,
+                selector,
+                selector_type,
+                timeout=int(timeout),
+                visible_only=True,
+            ))
+            el.send_keys(selenium_key)
+        else:
+            # Send keys to active element (usually body or focused element)
+            from selenium.webdriver.common.action_chains import ActionChains
+            ActionChains(DRIVER).send_keys(selenium_key).perform()
+
+        time.sleep(0.2)  # Brief pause
+        snapshot = _make_page_snapshot()
+
+        return json.dumps({
+            "ok": True,
+            "action": "send_keys",
+            "key": key,
+            "selector": selector,
+            "snapshot": snapshot,
+        })
+    except Exception as e:
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        snapshot = _make_page_snapshot()
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+
+async def wait_for_element(
+    selector: str,
+    selector_type: str = "css",
+    timeout: float = 10.0,
+    condition: str = "visible",
+    iframe_selector: Optional[str] = None,
+    iframe_selector_type: str = "css",
+) -> str:
+    """
+    Wait for an element to meet a specific condition.
+
+    Args:
+        selector: CSS selector, XPath, or ID of the element
+        selector_type: Type of selector (css, xpath, id)
+        timeout: Maximum time to wait in seconds
+        condition: Condition to wait for - 'present', 'visible', or 'clickable'
+        iframe_selector: Optional selector for iframe containing the element
+        iframe_selector_type: Selector type for the iframe
+
+    Returns:
+        JSON string with ok status, element found status, and page snapshot
+    """
+    try:
+        if DRIVER is None:
+            return json.dumps({"ok": False, "error": "driver_not_initialized"})
+
+        visible_only = condition in ("visible", "clickable")
+
+        el = find_element(
+            DRIVER,
+            selector,
+            selector_type,
+            timeout=int(timeout),
+            visible_only=visible_only,
+            iframe_selector=iframe_selector,
+            iframe_selector_type=iframe_selector_type,
+        )
+
+        if condition == "clickable":
+            _wait_clickable_element(el, timeout=timeout)
+
+        snapshot = _make_page_snapshot()
+        return json.dumps({
+            "ok": True,
+            "action": "wait_for_element",
+            "selector": selector,
+            "condition": condition,
+            "found": True,
+            "snapshot": snapshot,
+            "message": f"Element '{selector}' is now {condition}"
+        })
+    except TimeoutException:
+        snapshot = _make_page_snapshot()
+        return json.dumps({
+            "ok": False,
+            "error": "timeout",
+            "selector": selector,
+            "condition": condition,
+            "found": False,
+            "snapshot": snapshot,
+            "message": f"Element '{selector}' did not become {condition} within {timeout}s"
+        })
+    except Exception as e:
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        snapshot = _make_page_snapshot()
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+    finally:
+        try:
+            if DRIVER is not None:
+                DRIVER.switch_to.default_content()
+        except Exception:
+            pass
+
+async def get_cookies() -> str:
+    """
+    Get all cookies for the current page/domain.
+
+    Returns:
+        JSON string with ok status and list of cookies
+    """
+    try:
+        if DRIVER is None:
+            return json.dumps({"ok": False, "error": "driver_not_initialized"})
+
+        cookies = DRIVER.get_cookies()
+        snapshot = _make_page_snapshot()
+
+        return json.dumps({
+            "ok": True,
+            "action": "get_cookies",
+            "cookies": cookies,
+            "count": len(cookies),
+            "snapshot": snapshot,
+        })
+    except Exception as e:
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        snapshot = _make_page_snapshot()
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+
+async def add_cookie(
+    name: str,
+    value: str,
+    domain: Optional[str] = None,
+    path: str = "/",
+    secure: bool = False,
+    http_only: bool = False,
+    expiry: Optional[int] = None,
+) -> str:
+    """
+    Add a cookie to the browser.
+
+    Args:
+        name: Cookie name
+        value: Cookie value
+        domain: Optional domain for the cookie (defaults to current domain)
+        path: Cookie path (default: "/")
+        secure: Whether cookie should only be sent over HTTPS
+        http_only: Whether cookie should be HTTP-only
+        expiry: Optional expiry timestamp (Unix epoch seconds)
+
+    Returns:
+        JSON string with ok status and confirmation message
+    """
+    try:
+        if DRIVER is None:
+            return json.dumps({"ok": False, "error": "driver_not_initialized"})
+
+        cookie_dict = {
+            "name": name,
+            "value": value,
+            "path": path,
+            "secure": secure,
+            "httpOnly": http_only,
+        }
+
+        if domain:
+            cookie_dict["domain"] = domain
+        if expiry:
+            cookie_dict["expiry"] = int(expiry)
+
+        DRIVER.add_cookie(cookie_dict)
+        snapshot = _make_page_snapshot()
+
+        return json.dumps({
+            "ok": True,
+            "action": "add_cookie",
+            "cookie": {"name": name, "value": value},
+            "snapshot": snapshot,
+            "message": f"Cookie '{name}' added successfully"
+        })
+    except Exception as e:
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        snapshot = _make_page_snapshot()
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+
+async def delete_cookie(name: str) -> str:
+    """
+    Delete a specific cookie by name.
+
+    Args:
+        name: Name of the cookie to delete
+
+    Returns:
+        JSON string with ok status and confirmation message
+    """
+    try:
+        if DRIVER is None:
+            return json.dumps({"ok": False, "error": "driver_not_initialized"})
+
+        DRIVER.delete_cookie(name)
+        snapshot = _make_page_snapshot()
+
+        return json.dumps({
+            "ok": True,
+            "action": "delete_cookie",
+            "cookie_name": name,
+            "snapshot": snapshot,
+            "message": f"Cookie '{name}' deleted successfully"
+        })
+    except Exception as e:
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        snapshot = _make_page_snapshot()
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 #endregion

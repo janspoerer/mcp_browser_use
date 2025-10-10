@@ -104,6 +104,61 @@ It will display something like this if the browser is running:
 }
 ```
 
+## Lock Files and Coordination
+
+This MCP uses file-based locking to coordinate multiple agents accessing the same browser profile. All lock files are stored in `tmp/mcp_locks/` in the project root directory for easy inspection.
+
+### Lock File Types
+
+**Action Lock (`<hash>.softlock.json` and `<hash>.softlock.mutex`)**
+- Ensures only one agent can perform browser actions at a time
+- Default TTL: 30 seconds (configurable via `MCP_ACTION_LOCK_TTL`)
+- Automatically renewed with heartbeat while agent is working
+- Agents wait up to 60 seconds to acquire lock (configurable via `MCP_ACTION_LOCK_WAIT`)
+
+**Window Registry (`<hash>.window_registry.json`)**
+- Tracks which agent owns which browser window
+- Contains: targetId, windowId, process PID, last heartbeat timestamp
+- Used for orphan cleanup: automatically closes windows from crashed/stale agents
+- Stale threshold: 5 minutes (configurable via `MCP_WINDOW_REGISTRY_STALE_SECS`)
+
+**Startup Mutex (`<hash>.startup.mutex`)**
+- Ensures single browser instance startup per profile
+- Used during initial Chrome process launch coordination
+
+**File Format:** The `<hash>` is a SHA-256 hash derived from your Chrome profile's `user_data_dir` and `profile_name`, ensuring stable identification across processes.
+
+### Configuration
+
+You can customize lock behavior with these environment variables:
+
+```bash
+# Lock directory (default: <project_root>/tmp/mcp_locks/)
+MCP_BROWSER_LOCK_DIR=/path/to/locks
+
+# Action lock TTL in seconds (default: 30)
+MCP_ACTION_LOCK_TTL=30
+
+# Max wait time for action lock in seconds (default: 60)
+MCP_ACTION_LOCK_WAIT=60
+
+# Window registry stale threshold in seconds (default: 300)
+MCP_WINDOW_REGISTRY_STALE_SECS=300
+
+# File mutex stale threshold in seconds (default: 60)
+MCP_FILE_MUTEX_STALE_SECS=60
+```
+
+### Orphan Window Cleanup
+
+When an agent starts a browser session, it automatically:
+1. Checks the window registry for entries from dead processes (PID no longer exists)
+2. Checks for stale entries (no heartbeat for >5 minutes)
+3. Closes orphaned windows via Chrome DevTools Protocol
+4. Cleans up registry entries
+
+This ensures crashed or terminated agents don't leave zombie browser windows open.
+
 ## Demo Video (YouTube)
 
 [![Quick demo](https://img.youtube.com/vi/20B8trurlsI/hqdefault.jpg)](https://www.youtube.com/watch?v=20B8trurlsI)

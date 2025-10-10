@@ -194,3 +194,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# MCP browser lock files and temporary data
+tmp/

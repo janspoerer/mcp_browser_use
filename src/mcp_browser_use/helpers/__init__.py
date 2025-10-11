@@ -1824,7 +1824,7 @@ async def take_screenshot(screenshot_path, return_base64, return_snapshot, thumb
         return_base64: Whether to return base64 encoded image
         return_snapshot: Whether to return page HTML snapshot
         thumbnail_width: Optional width in pixels for thumbnail (requires return_base64=True)
-                        Default: 400px if return_base64 is True
+                        Default: 200px if return_base64 is True (accounts for MCP overhead)
 
     Returns:
         JSON string with ok status, saved path, optional base64 thumbnail, and snapshot
@@ -1845,9 +1845,10 @@ async def take_screenshot(screenshot_path, return_base64, return_snapshot, thumb
 
         # Handle base64 return with thumbnail
         if return_base64:
-            # Default thumbnail width to 400px if base64 is requested
+            # Default thumbnail width to 200px to account for MCP protocol overhead (~3x)
+            # 200px thumbnail = ~6K tokens, plus MCP overhead = ~18K total (under 25K limit)
             if thumbnail_width is None:
-                thumbnail_width = 400
+                thumbnail_width = 200
 
             # Validate thumbnail width
             if thumbnail_width < 50:

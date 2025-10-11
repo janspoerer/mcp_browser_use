@@ -14,10 +14,6 @@ When a second agent opens a browser, the agent gets its own browser window. IT
 MUST NOT USE THE SAME BROWSER WINDOW! The second agent WILL NOT open another 
 browser session.
 
-## Locking Logic
-
-When a 
-
 ## Performance Considerations
 
 We do not mind additional overhead from validations. The most important thing is that the code is robust.

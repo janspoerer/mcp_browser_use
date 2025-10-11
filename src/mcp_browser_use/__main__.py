@@ -60,16 +60,11 @@ When a second agent opens a browser, the agent gets its own browser window. IT M
 start_browser
 ```
 > Starts a browser if no browser session is open yet for the given user profile.
-Opens a new window if an exisitng browser session is already there.
+Opens a new window if an existing browser session is already there.
 Multiple agents can share one browser profile (user directory) by each opening a different browser.
-This has no impact on the individual agents. For them, they just open a browser 
+This has no impact on the individual agents. For them, they just open a browser
 and they do not need to know if other agents are also working
 alongside them. The browser handling is abstracted away by the MCP.
-
-```
-get_browser_versions
-```
-> Return the installed Chrome and Chromedriver versions to verify compatibility.
 
 ```
 navigate
@@ -107,7 +102,7 @@ click_element
 fill_text
 ```
 > Input text into an element.
-> 
+>
 > Note: For multi-step iframe interactions, specify iframe_selector in each call.
 > Browser context resets after each action for reliability.
 >
@@ -119,6 +114,8 @@ fill_text
 >         timeout: Maximum time to wait for the element in seconds
 >         iframe_selector: Selector for the iframe (if element is inside iframe)
 >         iframe_selector_type: Selector type for the iframe
+>         shadow_root_selector: Optional selector for shadow root containing the element
+>         shadow_root_selector_type: Selector type for the shadow root
 
 ```
 send_keys
@@ -143,9 +140,14 @@ scroll
 take_screenshot
 ```
 > Take a screenshot of the current page.
-> 
+>
 >     Args:
->         screenshot_path: Optional path to save screenshot file
+>         screenshot_path: Optional path to save the full screenshot
+>         return_base64: Whether to return base64 encoded thumbnail (default: False)
+>         return_snapshot: Whether to return page HTML snapshot (default: False)
+>         thumbnail_width: Optional width in pixels for thumbnail (default: 200px if return_base64=True)
+>                         Minimum: 50px. Only used when return_base64=True.
+>                         Note: 200px accounts for MCP protocol overhead to stay under 25K token limit.
 
 
 ```
@@ -230,6 +232,17 @@ mcp = FastMCP("mcp_browser_use")
 @tool_envelope
 @exclusive_browser_access
 async def mcp_browser_use__start_browser() -> str:
+    """
+    Start a browser session or open a new window in an existing session.
+
+    If no browser is running, starts a new Chrome browser with the configured profile.
+    If a browser is already running, opens a new window in the existing session.
+    Each MCP agent gets its own browser window, allowing multiple agents to work
+    independently while sharing the same browser profile (e.g., for persistent logins).
+
+    Returns:
+        str: Success message with browser initialization details and HTML snapshot
+    """
     return await MBU.helpers.start_browser()
 
 @mcp.tool()
@@ -237,9 +250,19 @@ async def mcp_browser_use__start_browser() -> str:
 @exclusive_browser_access
 @ensure_driver_ready
 async def mcp_browser_use__navigate_to_url(
-    url: str, 
+    url: str,
     timeout: float = 30.0
 ) -> str:
+    """
+    Navigate the browser to a specified URL.
+
+    Args:
+        url: The URL to navigate to (must be a valid HTTP/HTTPS URL)
+        timeout: Maximum time in seconds to wait for page load (default: 30.0)
+
+    Returns:
+        str: Success message with the page title and HTML snapshot of the loaded page
+    """
     return await MBU.helpers.navigate_to_url(url=url, timeout=timeout)
 
 @mcp.tool()
@@ -257,6 +280,30 @@ async def mcp_browser_use__fill_text(
     shadow_root_selector: Optional[str] = None,
     shadow_root_selector_type: str = "css",
 ) -> str:
+    """
+    Fill text into an input field on the page, with support for iframes and shadow DOM.
+
+    Note: For multi-step iframe interactions, specify iframe_selector in each call.
+    Browser context resets after each action for reliability.
+
+    Args:
+        selector: CSS selector, XPath, or ID of the input field
+        text: Text to enter into the field
+        selector_type: Type of selector - 'css', 'xpath', or 'id' (default: 'css')
+        clear_first: Whether to clear the field before entering text (default: True)
+        timeout: Maximum time in seconds to wait for the element (default: 10.0)
+        iframe_selector: Optional selector for iframe containing the element
+        iframe_selector_type: Selector type for the iframe - 'css', 'xpath', or 'id' (default: 'css')
+        shadow_root_selector: Optional selector for shadow root containing the element
+        shadow_root_selector_type: Selector type for the shadow root - 'css', 'xpath', or 'id' (default: 'css')
+
+    Returns:
+        str: Success message with HTML snapshot after filling the text
+
+    Note:
+        If this fails due to captchas or visibility issues, ask the user to manually
+        complete the action (e.g., logging in) and then continue with the next steps.
+    """
     snapshot = await MBU.helpers.fill_text(
         selector=selector,
         text=text,
@@ -288,6 +335,25 @@ async def mcp_browser_use__click_element(
     shadow_root_selector: Optional[str] = None,
     shadow_root_selector_type: str = "css",
 ) -> str:
+    """
+    Click an element on the page, with support for iframes and shadow DOM.
+
+    Note: For multi-step iframe interactions, specify iframe_selector in each call.
+    Browser context resets after each action for reliability.
+
+    Args:
+        selector: CSS selector, XPath, or ID of the element to click
+        selector_type: Type of selector - 'css', 'xpath', or 'id' (default: 'css')
+        timeout: Maximum time in seconds to wait for the element to be clickable (default: 10.0)
+        force_js: If True, uses JavaScript to click instead of Selenium's native click (default: False)
+        iframe_selector: Optional selector for iframe containing the element
+        iframe_selector_type: Selector type for the iframe - 'css', 'xpath', or 'id' (default: 'css')
+        shadow_root_selector: Optional selector for shadow root containing the element
+        shadow_root_selector_type: Selector type for the shadow root - 'css', 'xpath', or 'id' (default: 'css')
+
+    Returns:
+        str: Success message with the current URL, page title, and HTML snapshot after clicking
+    """
     snapshot = await MBU.helpers.click_element(
         selector=selector,
         selector_type=selector_type,
@@ -321,8 +387,9 @@ async def mcp_browser_use__take_screenshot(
         screenshot_path: Optional path to save the full screenshot
         return_base64: Whether to return base64 encoded thumbnail (default: False)
         return_snapshot: Whether to return page HTML snapshot (default: False)
-        thumbnail_width: Optional width in pixels for thumbnail (default: 400px if return_base64=True)
+        thumbnail_width: Optional width in pixels for thumbnail (default: 200px if return_base64=True)
                         Minimum: 50px. Only used when return_base64=True.
+                        Note: 200px accounts for MCP protocol overhead to stay under 25K token limit.
     """
     snapshot = await MBU.helpers.take_screenshot(
         screenshot_path=screenshot_path,

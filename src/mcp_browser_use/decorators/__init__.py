@@ -18,12 +18,14 @@ import os
 import json
 import asyncio
 import inspect
+import warnings
 import datetime
 import functools
 import traceback
 import contextlib
 from typing import Callable
-from warnings import deprecated
+
+
 import threading, time as _time
 from typing import Any, Callable
 from .ensure import ensure_driver_ready
@@ -34,6 +36,16 @@ __all__ = [
     "ensure_driver_ready",
 ]
 
+
+
+def deprecated(reason: str):
+    def _decorator(func):
+        @functools.wraps(func)
+        def _wrapper(*args, **kwargs):
+            warnings.warn(f"{func.__name__} is deprecated: {reason}", DeprecationWarning, stacklevel=2)
+            return func(*args, **kwargs)
+        return _wrapper
+    return _decorator
 #################################################################
 ######## Main Locking Logic                              ######## 
 #################################################################    

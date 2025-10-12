@@ -85,8 +85,10 @@ from selenium.webdriver.support import expected_conditions as EC
 #endregion
 
 #region Imports Dotenv
-from dotenv import load_dotenv
-load_dotenv()
+from dotenv import load_dotenv, find_dotenv
+# __file__ is src/mcp_browser_use/helpers/__init__.py, so go up 4 levels to project root
+# _env_path = Path(__file__).parent.parent.parent.parent / ".env"
+load_dotenv(find_dotenv(filename=".env", usecwd=True), override=True)
 #endregion
 
 #region Constants / policy parameters
@@ -432,41 +434,92 @@ def _unregister_window(agent_id: str):
         del registry[agent_id]
         _write_window_registry(registry)
 
-def cleanup_orphaned_windows(driver: webdriver.Chrome):
+def cleanup_orphaned_windows(driver: webdriver.Chrome, *, close_on_stale: bool = False):
     """
-    Close windows owned by dead or stale processes.
-    Called during browser startup to clean up windows from crashed agents.
+    Close windows owned by dead processes. Optionally close very stale windows if explicitly enabled.
+
+    - Default behavior: only close when the owning PID no longer exists.
+    - Stale heartbeats are logged but not closed by default to avoid killing idle sessions.
     """
+    # If you have a registry/file lock, acquire it here
+    # with _registry_lock():
     registry = _read_window_registry()
     now = time.time()
 
-    to_remove = []
-    for agent_id, info in registry.items():
+    to_remove: list[str] = []
+    changed = False
+
+    # Optional: detect already-missing targets to avoid noisy close attempts
+    try:
+        targets_resp = driver.execute_cdp_cmd("Target.getTargets", {})
+        known_targets = {t.get("targetId") for t in targets_resp.get("targetInfos", [])}
+    except Exception:
+        known_targets = None  # fall back to best-effort without pre-check
+
+    for agent_id, info in list(registry.items()):
         pid = info.get("pid")
-        last_hb = info.get("last_heartbeat", 0)
+        last_hb = info.get("last_heartbeat")
         target_id = info.get("target_id")
 
-        # Check if process is dead or heartbeat is stale
-        is_dead = pid and not psutil.pid_exists(pid)
-        is_stale = (now - last_hb) > WINDOW_REGISTRY_STALE_THRESHOLD
-
-        if is_dead or is_stale:
-            # Try to close the orphaned window
-            try:
-                driver.execute_cdp_cmd("Target.closeTarget", {"targetId": target_id})
-                logger.info(f"Closed orphaned window: agent={agent_id}, target={target_id}, dead={is_dead}, stale={is_stale}")
-            except Exception as e:
-                logger.debug(f"Could not close orphaned window {target_id}: {e}")
-                pass  # Window might already be closed
-
+        # Robustness: skip weird records
+        if target_id is None:
+            logger.info(f"Removing registry entry with no target_id: agent={agent_id}, pid={pid}")
             to_remove.append(agent_id)
+            changed = True
+            continue
+
+        # Compute states safely
+        try:
+            is_dead = bool(pid) and not psutil.pid_exists(int(pid))
+        except Exception:
+            # If pid cannot be parsed, treat as unknown (do not close)
+            is_dead = False
+
+        is_stale = False
+        if isinstance(last_hb, (int, float)):
+            try:
+                is_stale = (now - float(last_hb)) > WINDOW_REGISTRY_STALE_THRESHOLD
+            except Exception:
+                is_stale = False
+
+        # If target is already gone, just drop the registry entry
+        if known_targets is not None and target_id not in known_targets:
+            logger.info(f"Target already gone; pruning registry entry: agent={agent_id}, target={target_id}")
+            to_remove.append(agent_id)
+            changed = True
+            continue
+
+        # Decide whether to close
+        should_close = is_dead or (close_on_stale and is_stale)
+        if not should_close:
+            if is_stale:
+                logger.debug(f"Stale heartbeat but not closing (agent={agent_id}, pid={pid})")
+            continue
+
+        # Try to close the target
+        try:
+            res = driver.execute_cdp_cmd("Target.closeTarget", {"targetId": target_id})
+            success = (res.get("success", True) if isinstance(res, dict) else True)
+            logger.info(
+                f"Closed orphaned window: agent={agent_id}, target={target_id}, "
+                f"dead={is_dead}, stale={is_stale}, success={success}"
+            )
+        except Exception as e:
+            # Even if we fail to close a window of a dead process, remove the entry to avoid leaks
+            logger.debug(f"Could not close target {target_id} for agent {agent_id}: {e}")
+
+        to_remove.append(agent_id)
+        changed = True
 
     # Clean up registry
     if to_remove:
         for agent_id in to_remove:
-            del registry[agent_id]
+            registry.pop(agent_id, None)
         _write_window_registry(registry)
-        logger.info(f"Cleaned up {len(to_remove)} orphaned window(s) from registry")
+        logger.info(f"Cleaned up {len(to_remove)} window registry entry(ies)")
+    elif changed:
+        # In case we changed something else
+        _write_window_registry(registry)
 #endregion
 
 #region Driver & window
@@ -517,18 +570,62 @@ def _launch_chrome_with_debug(cfg: dict, port: int) -> None:
     exe = _resolve_chrome_executable(cfg)
     udir = cfg["user_data_dir"]
     prof = cfg.get("profile_name")
+
+    # Check if headless mode is enabled
+    headless = os.getenv("MCP_HEADLESS", "0").strip()
+    is_headless = headless in ("1", "true", "True", "yes", "Yes")
+
     cmd = [
         exe,
         f"--user-data-dir={udir}",
         f"--remote-debugging-port={port}",
         "--no-first-run",
         "--no-default-browser-check",
+        "--new-window",  # Fix 1: Force new window even if Chrome is running
+        "--disable-features=ProcessPerSite",  # Fix 3: Better process isolation
+        "--disable-gpu",  # Stability: Disable GPU hardware acceleration
+        "--disable-dev-shm-usage",  # Stability: Overcome limited resource problems
+        "--disable-software-rasterizer",  # Stability: Disable software rasterizer
+        "--disable-hang-monitor",  # Keep Chrome alive longer
         "about:blank",
     ]
     if prof:
         cmd.append(f"--profile-directory={prof}")
+    if is_headless:
+        cmd.append("--headless=new")
+
+    # Fix 2: Create error log file (opened but not passed to Chrome to avoid handle issues)
+    log_dir = Path(tempfile.gettempdir()) / "mcp_browser_logs"
+    log_dir.mkdir(exist_ok=True)
+    error_log = log_dir / f"chrome_debug_{port}.log"
+
     # Start detached; Chrome writes DevToolsActivePort when ready.
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # On Windows, use CREATE_NO_WINDOW to avoid console but allow debug port initialization
+    if platform.system() == "Windows":
+        proc = subprocess.Popen(
+            cmd,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL
+        )
+    else:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+
+    # Fix 4: Verify Chrome actually started (wait for process to stabilize)
+    time.sleep(2.0)  # Give Chrome time to fully initialize
+    try:
+        # Check if process is still alive
+        if proc.poll() is not None:
+            # Process exited immediately, read error log
+            try:
+                with open(error_log, "r") as log:
+                    error_content = log.read()
+                    logger.error(f"Chrome failed to start. Exit code: {proc.returncode}. Log: {error_content}")
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 def _ensure_debugger_ready(cfg: dict, max_wait_secs: float | None = None) -> None:
     """
@@ -546,11 +643,11 @@ def _ensure_debugger_ready(cfg: dict, max_wait_secs: float | None = None) -> Non
         DEBUGGER_HOST = None
         DEBUGGER_PORT = None
 
-    # Allow override by env; default to 30 seconds
+    # Allow override by env; default to 10 seconds (reduced for faster failures)
     try:
-        max_wait_secs = float(os.getenv("MCP_DEVTOOLS_MAX_WAIT_SECS", "30")) if max_wait_secs is None else float(max_wait_secs)
+        max_wait_secs = float(os.getenv("MCP_DEVTOOLS_MAX_WAIT_SECS", "10")) if max_wait_secs is None else float(max_wait_secs)
     except Exception:
-        max_wait_secs = 30.0
+        max_wait_secs = 10.0
 
     udir = cfg["user_data_dir"]
     env_port = os.getenv("CHROME_REMOTE_DEBUG_PORT")
@@ -945,48 +1042,59 @@ def _wait_document_ready(timeout: float = 10.0):
         # Not fatal
         pass
 
-def _make_page_snapshot(max_chars: Optional[int] = None) -> Dict[str, Any]:
-    """
-    Return a cleaned page snapshot: url, title, cleaned html.
-    Ensures we are in default_content before capturing page_source.
-    """
-    if max_chars is None:
-        max_chars = MAX_SNAPSHOT_CHARS
 
-    # Make sure we're at top-level document
-    try:
-        if DRIVER is not None:
-            DRIVER.switch_to.default_content()
-    except Exception:
-        pass
-
+def _make_page_snapshot(
+    max_snapshot_chars: Optional[int] = None,   # ignored (legacy)
+    aggressive_cleaning: bool = False,          # ignored (legacy)
+    offset_chars: int = 0,                      # ignored (legacy)
+) -> dict:
+    """
+    Capture the raw page snapshot (no cleaning, no truncation).
+    Returns a dict: {"url": str|None, "title": str|None, "html": str}
+    """
     url = None
     title = None
-    try:
-        url = DRIVER.current_url
-    except Exception:
-        pass
-    try:
-        title = DRIVER.title
-    except Exception:
-        pass
-
     html = ""
-    truncated = False
     try:
-        html = get_cleaned_html(DRIVER) or ""
-        if max_chars and max_chars > 0 and len(html) > max_chars:
-            html = html[:max_chars]
-            truncated = True
+        if DRIVER is not None:
+            try:
+                DRIVER.switch_to.default_content()
+            except Exception:
+                pass
+            try:
+                url = DRIVER.current_url
+            except Exception:
+                url = None
+            try:
+                title = DRIVER.title
+            except Exception:
+                title = None
+
+            # Ensure DOM is ready, then apply configurable settle
+            try:
+                _wait_document_ready(timeout=5.0)
+            except Exception:
+                pass
+            try:
+                settle_ms = int(os.getenv("SNAPSHOT_SETTLE_MS", "200") or "0")
+                if settle_ms > 0:
+                    time.sleep(settle_ms / 1000.0)
+            except Exception:
+                pass
+
+            # Prefer outerHTML; fall back to page_source
+            try:
+                html = DRIVER.execute_script("return document.documentElement.outerHTML") or ""
+                if not html:
+                    html = DRIVER.page_source or ""
+            except Exception:
+                try:
+                    html = DRIVER.page_source or ""
+                except Exception:
+                    html = ""
     except Exception:
         pass
-
-    return {
-        "url": url,
-        "title": title,
-        "html": html,
-        "truncated": truncated,
-    }
+    return {"url": url, "title": title, "html": html}
 #endregion
 
 #region Tool helpers (clickable wait using a lambda on the element)
@@ -1264,6 +1372,11 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
 
         # Start Chrome on fixed port
         binary = _chrome_binary_for_platform(config)
+
+        # Check if headless mode is enabled
+        headless = os.getenv("MCP_HEADLESS", "0").strip()
+        is_headless = headless in ("1", "true", "True", "yes", "Yes")
+
         cmd = [
             binary,
             f"--remote-debugging-port={port}",
@@ -1271,9 +1384,39 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
             f"--profile-directory={profile_name}",
             "--no-first-run",
             "--no-default-browser-check",
-            "about:blank",  
+            "--new-window",  # Fix 1: Force new window even if Chrome is running
+            "--disable-features=ProcessPerSite",  # Fix 3: Better process isolation
+            "--disable-gpu",  # Stability: Disable GPU hardware acceleration
+            "--disable-dev-shm-usage",  # Stability: Overcome limited resource problems
+            "--disable-software-rasterizer",  # Stability: Disable software rasterizer
+            "about:blank",
         ]
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if is_headless:
+            cmd.append("--headless=new")
+
+        # Fix 2: Create error log file
+        log_dir = Path(tempfile.gettempdir()) / "mcp_browser_logs"
+        log_dir.mkdir(exist_ok=True)
+        error_log = log_dir / f"chrome_debug_{port}.log"
+
+        # On Windows, use CREATE_NO_WINDOW to avoid console but allow debug port initialization
+        if platform.system() == "Windows":
+            proc = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        else:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+
+        # Fix 4: Verify Chrome actually started
+        time.sleep(2.0)  # Give Chrome time to fully initialize
+        try:
+            if proc.poll() is not None:
+                try:
+                    with open(error_log, "r") as log:
+                        error_content = log.read()
+                        logger.error(f"Chrome failed to start. Exit code: {proc.returncode}. Log: {error_content}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # Wait for DevTools endpoint
         for _ in range(100):
@@ -1325,6 +1468,11 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
         # Choose a free port and start Chrome
         port = get_free_port()
         binary = _chrome_binary_for_platform(config)
+
+        # Check if headless mode is enabled
+        headless = os.getenv("MCP_HEADLESS", "0").strip()
+        is_headless = headless in ("1", "true", "True", "yes", "Yes")
+
         cmd = [
             binary,
             f"--remote-debugging-port={port}",
@@ -1332,9 +1480,39 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
             f"--profile-directory={profile_name}",
             "--no-first-run",
             "--no-default-browser-check",
+            "--new-window",  # Fix 1: Force new window even if Chrome is running
+            "--disable-features=ProcessPerSite",  # Fix 3: Better process isolation
+            "--disable-gpu",  # Stability: Disable GPU hardware acceleration
+            "--disable-dev-shm-usage",  # Stability: Overcome limited resource problems
+            "--disable-software-rasterizer",  # Stability: Disable software rasterizer
             "about:blank",
         ]
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if is_headless:
+            cmd.append("--headless=new")
+
+        # Fix 2: Create error log file
+        log_dir = Path(tempfile.gettempdir()) / "mcp_browser_logs"
+        log_dir.mkdir(exist_ok=True)
+        error_log = log_dir / f"chrome_debug_{port}.log"
+
+        # On Windows, use CREATE_NO_WINDOW to avoid console but allow debug port initialization
+        if platform.system() == "Windows":
+            proc = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        else:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+
+        # Fix 4: Verify Chrome actually started
+        time.sleep(2.0)  # Give Chrome time to fully initialize
+        try:
+            if proc.poll() is not None:
+                try:
+                    with open(error_log, "r") as log:
+                        error_content = log.read()
+                        logger.error(f"Chrome failed to start. Exit code: {proc.returncode}. Log: {error_content}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # Wait for DevTools endpoint
         for _ in range(100):
@@ -1498,15 +1676,85 @@ def find_element(
             except Exception:
                 pass
 
-def remove_unwanted_tags(html_content: str) -> str:
+def remove_unwanted_tags(html_content: str, aggressive: bool = False) -> str:
+    """
+    Remove unwanted tags from HTML.
+
+    Args:
+        html_content: Raw HTML string
+        aggressive: If True, removes additional tags like svg, iframe, comments, headers, footers, navigation
+
+    Returns:
+        Cleaned HTML string with whitespace collapsed
+    """
+    from bs4 import Comment
+
     soup = BeautifulSoup(html_content, 'html.parser')
-    for tag in soup.find_all(['script', 'style', 'meta', 'link', 'noscript']):
+
+    # Always remove these
+    basic_removals = ['script', 'style', 'meta', 'link', 'noscript']
+
+    # Aggressive mode removes more
+    if aggressive:
+        basic_removals.extend([
+            'svg', 'iframe', 'canvas', 'form'
+        ])
+
+    for tag in soup.find_all(basic_removals):
         tag.extract()
+
+    # Remove HTML comments in aggressive mode
+    if aggressive:
+        for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
+            comment.extract()
+
+        # Remove hidden inputs
+        for hidden_input in soup.find_all('input', {'type': 'hidden'}):
+            hidden_input.extract()
+
+        # Remove headers, footers, and navigation (huge space savers for e-commerce sites)
+        for tag in soup.find_all(['header', 'footer', 'nav']):
+            tag.extract()
+
+        # Remove common navigation/menu class patterns (but be more selective)
+        for tag in soup.find_all(class_=lambda c: c and any(x in str(c).lower() for x in ['-header', '-footer', '-navigation', 'nav-main', '-menu', '-flyout', '-dropdown', 'breadcrumb'])):
+            tag.extract()
+
+        # Remove all attributes except critical ones for product data
+        critical_attrs = {'href', 'src', 'alt', 'title', 'class', 'id', 'type', 'name', 'value'}
+        for tag in soup.find_all(True):
+            # Remove all non-critical attributes
+            attrs_to_remove = [attr for attr in tag.attrs if attr not in critical_attrs]
+            for attr in attrs_to_remove:
+                del tag[attr]
+
+            # Also remove data-* attributes (often just for JS functionality)
+            data_attrs = [attr for attr in tag.attrs if attr.startswith('data-')]
+            for attr in data_attrs:
+                del tag[attr]
+
+        # Remove empty tags after cleaning, but preserve structural tags like body, html, divs with children
+        # Only remove leaf nodes that are empty
+        for tag in soup.find_all():
+            if tag.name not in ['html', 'head', 'body'] and not tag.get_text(strip=True) and not tag.find_all(['img', 'input', 'br', 'hr', 'a']):
+                tag.extract()
+
+    # Collapse whitespace
     return ' '.join(str(soup).split())
 
-def get_cleaned_html(driver: webdriver.Chrome) -> str:
+def get_cleaned_html(driver: webdriver.Chrome, aggressive: bool = False) -> str:
+    """
+    Get cleaned HTML from the current page.
+
+    Args:
+        driver: Selenium WebDriver instance
+        aggressive: If True, applies aggressive HTML cleaning
+
+    Returns:
+        Cleaned HTML string
+    """
     html_content = driver.page_source
-    return remove_unwanted_tags(html_content)
+    return remove_unwanted_tags(html_content, aggressive=aggressive)
 #endregion
 
 #region Diagnostics
@@ -1670,31 +1918,42 @@ async def start_browser():
         }
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
     
-async def navigate_to_url(url, timeout):
+# helpers/__init__.py
+
+async def navigate_to_url(
+    url: str,
+    wait_for: str = "load",     # "load" or "complete"
+    timeout_sec: int = 30,
+) -> str:
+    """
+    Navigate to a URL and return JSON with a raw snapshot.
+    """
+    try:
+        if DRIVER is None:
+            return json.dumps({"ok": False, "error": "driver_not_initialized"})
+
+        DRIVER.get(url)
+
+        # DOM readiness
         try:
-            if not url or not isinstance(url, str):
-                snapshot = _make_page_snapshot()
-                return json.dumps({"ok": False, "error": "invalid_url", "snapshot": snapshot})
+            _wait_document_ready(timeout=min(max(timeout_sec, 0), 60))
+        except Exception:
+            pass
 
-            if DRIVER is None:
-                return json.dumps({"ok": False, "error": "driver_not_initialized"})
+        if (wait_for or "load").lower() == "complete":
+            try:
+                WebDriverWait(DRIVER, timeout_sec).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+            except Exception:
+                pass
 
-
-            DRIVER.get(url)
-            _wait_document_ready(timeout=min(15.0, float(timeout)))
-            snapshot = _make_page_snapshot()
-            return json.dumps({"ok": True, "url": url, "snapshot": snapshot, "message": f"Navigated to {url}"})
-        except Exception as e:
-
-            diag = collect_diagnostics(DRIVER, e, get_env_config())
-            snapshot = _make_page_snapshot()
-            return json.dumps({
-                "ok": False,
-                "error": str(e),
-                "traceback": traceback.format_exc(),  # helps locate the exact line
-                "diagnostics": diag,
-                "snapshot": snapshot
-            })
+        snapshot = _make_page_snapshot()
+        return json.dumps({"ok": True, "action": "navigate", "url": url, "snapshot": snapshot})
+    except Exception as e:
+        diag = collect_diagnostics(DRIVER, e, get_env_config())
+        snapshot = _make_page_snapshot()
+        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 
 async def fill_text(
     selector,
@@ -1706,6 +1965,9 @@ async def fill_text(
     iframe_selector_type,
     shadow_root_selector,
     shadow_root_selector_type,
+    max_snapshot_chars=5000,
+    aggressive_cleaning=False,
+    offset_chars=0,
 ):
     try:
 
@@ -1730,11 +1992,11 @@ async def fill_text(
         el.send_keys(text)
         _wait_document_ready(timeout=5.0)
 
-        snapshot = _make_page_snapshot()
+        snapshot = _make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
         return json.dumps({"ok": True, "action": "fill_text", "selector": selector, "snapshot": snapshot})
     except Exception as e:
         diag = collect_diagnostics(DRIVER, e, get_env_config())
-        snapshot = _make_page_snapshot()
+        snapshot = _make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
     finally:
         try:
@@ -1752,6 +2014,9 @@ async def click_element(
     iframe_selector_type,
     shadow_root_selector,
     shadow_root_selector_type,
+    max_snapshot_chars=5000,
+    aggressive_cleaning=False,
+    offset_chars=0,
 ) -> str:
     try:
 
@@ -1787,7 +2052,7 @@ async def click_element(
 
         _wait_document_ready(timeout=10.0)
 
-        snapshot = _make_page_snapshot()
+        snapshot = _make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
         return json.dumps({
             "ok": True,
             "action": "click",
@@ -1796,7 +2061,7 @@ async def click_element(
             "snapshot": snapshot,
         })
     except TimeoutException:
-        snapshot = _make_page_snapshot()
+        snapshot = _make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
         return json.dumps({
             "ok": False,
             "error": "timeout",
@@ -1806,7 +2071,7 @@ async def click_element(
         })
     except Exception as e:
         diag = collect_diagnostics(DRIVER, e, get_env_config())
-        snapshot = _make_page_snapshot()
+        snapshot = _make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
     finally:
         try:
@@ -2096,13 +2361,128 @@ async def close_browser() -> str:
         diag = collect_diagnostics(DRIVER, e, get_env_config())
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag})
 
-async def scroll(x: int, y: int) -> str:
+async def force_close_all_chrome() -> str:
+    """
+    Force close all Chrome processes, quit driver, and clean up all state.
+    Use this to recover from stuck Chrome instances or when normal close_browser fails.
+    """
+    global DRIVER, DEBUGGER_HOST, DEBUGGER_PORT, TARGET_ID, WINDOW_ID, MY_TAG
+
+    killed_processes = []
+    errors = []
+
+    try:
+        # 1. Try to quit the Selenium driver gracefully
+        if DRIVER is not None:
+            try:
+                DRIVER.quit()
+            except Exception as e:
+                errors.append(f"Driver quit failed: {e}")
+            DRIVER = None
+
+        # 2. Get config to find which Chrome processes to kill
+        try:
+            cfg = get_env_config()
+            user_data_dir = cfg.get("user_data_dir", "")
+        except Exception as e:
+            user_data_dir = ""
+            errors.append(f"Could not get config: {e}")
+
+        # 3. Kill all Chrome processes using the MCP profile
+        # First, try targeted kill based on user_data_dir
+        chrome_processes_found = []
+        for p in psutil.process_iter(["name", "cmdline", "pid"]):
+            try:
+                if not p.info.get("name"):
+                    continue
+                if "chrome" not in p.info["name"].lower():
+                    continue
+                chrome_processes_found.append(p)
+
+                # If we have a user_data_dir, check if this process matches
+                if user_data_dir:
+                    cmd = p.info.get("cmdline")
+                    if cmd:
+                        # Check if any argument contains our user_data_dir path
+                        # Use 'in' check because paths might have different separators or be normalized differently
+                        user_data_normalized = user_data_dir.replace("\\", "/").lower()
+                        for arg in cmd:
+                            if arg and "--user-data-dir" in arg:
+                                arg_normalized = arg.replace("\\", "/").lower()
+                                if user_data_normalized in arg_normalized:
+                                    p.kill()
+                                    killed_processes.append(p.info["pid"])
+                                    break
+            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                errors.append(f"Could not access process: {e}")
+
+        # 4. Fallback: If no Chrome processes were killed but some were found, kill them all
+        # This ensures we don't leave zombie Chrome processes
+        if not killed_processes and chrome_processes_found:
+            for p in chrome_processes_found:
+                try:
+                    p.kill()
+                    killed_processes.append(p.info["pid"])
+                except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                    errors.append(f"Could not kill process in fallback: {e}")
+
+        # 5. Clean up global state
+        DEBUGGER_HOST = None
+        DEBUGGER_PORT = None
+        TARGET_ID = None
+        WINDOW_ID = None
+
+        # 6. Release locks
+        try:
+            if MY_TAG:
+                _release_action_lock(MY_TAG)
+        except Exception as e:
+            errors.append(f"Lock release failed: {e}")
+
+        # 7. Clean up lock files
+        try:
+            if user_data_dir:
+                lock_dir = Path(LOCK_DIR)
+                # lock_dir = Path(tempfile.gettempdir()) / "mcp_browser_locks"
+                if lock_dir.exists():
+                    profile_key_val = profile_key(cfg) if cfg else ""
+                    for lock_file in lock_dir.glob(f"*{profile_key_val}*"):
+                        try:
+                            lock_file.unlink()
+                        except Exception:
+                            pass
+        except Exception as e:
+            errors.append(f"Lock file cleanup failed: {e}")
+
+        msg = f"Force closed Chrome. Killed {len(killed_processes)} processes."
+        if errors:
+            msg += f" Errors: {'; '.join(errors)}"
+
+        return json.dumps({
+            "ok": True,
+            "killed_processes": killed_processes,
+            "errors": errors,
+            "message": msg
+        })
+
+    except Exception as e:
+        return json.dumps({
+            "ok": False,
+            "error": str(e),
+            "killed_processes": killed_processes,
+            "errors": errors
+        })
+
+async def scroll(x: int, y: int, max_snapshot_chars=0, aggressive_cleaning=False, offset_chars=0) -> str:
     """
     Scroll the page by the specified pixel amounts.
 
     Args:
         x: Horizontal scroll amount in pixels (positive = right, negative = left)
         y: Vertical scroll amount in pixels (positive = down, negative = up)
+        max_snapshot_chars: Maximum HTML characters to return (default: 0 to save context)
+        aggressive_cleaning: Whether to apply aggressive HTML cleaning
+        offset_chars: Number of characters to skip from start of HTML (default: 0)
 
     Returns:
         JSON string with ok status, action, scroll amounts, and page snapshot
@@ -2114,7 +2494,7 @@ async def scroll(x: int, y: int) -> str:
         DRIVER.execute_script(f"window.scrollBy({int(x)}, {int(y)});")
         time.sleep(0.3)  # Brief pause to allow scroll to complete
 
-        snapshot = _make_page_snapshot()
+        snapshot = _make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
         return json.dumps({
             "ok": True,
             "action": "scroll",
@@ -2124,7 +2504,7 @@ async def scroll(x: int, y: int) -> str:
         })
     except Exception as e:
         diag = collect_diagnostics(DRIVER, e, get_env_config())
-        snapshot = _make_page_snapshot()
+        snapshot = _make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 
 async def send_keys(
@@ -2398,4 +2778,31 @@ async def delete_cookie(name: str) -> str:
         diag = collect_diagnostics(DRIVER, e, get_env_config())
         snapshot = _make_page_snapshot()
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+#endregion
+
+
+#region
+async def get_current_page_meta():
+    """
+    Get current page metadata from the active window/tab.
+
+    Returns:
+        Dict[str, Optional[str]]: A metadata dictionary with keys such as:
+            - "url": The current page URL, or None if not available.
+            - "title": The current document.title, or None.
+            - "window_tag": An implementation-specific identifier for the window/tab.
+    """
+    try:
+        url = DRIVER.current_url if DRIVER else None
+    except Exception:
+        url = None
+    try:
+        title = DRIVER.title if DRIVER else None
+    except Exception:
+        title = None
+    try:
+        window_tag = ensure_process_tag()
+    except Exception:
+        window_tag = None
+    return {"url": url, "title": title, "window_tag": window_tag}
 #endregion

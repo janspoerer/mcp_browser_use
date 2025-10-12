@@ -4,6 +4,12 @@
 Multi-step iframe interactions require specifying iframe_selector for each action.
 This is intentional design to prevent context state bugs.
 
+## Price, Stock Quantity, and Delivery Times
+
+If you cannot see detailed prices, stock quanities, and delivery times and you suspect that data might be available behind a login, please ask Jan on Slack for help. He can probably log you in.
+
+
+
 ## Performance Considerations
 
 We do not mind additional overhead from validations. The most important thing is that the code is robust.
@@ -227,23 +233,95 @@ logger.warning(f"mcp_browser_use from: {getattr(MBU, '__file__', '<namespace>')}
 mcp = FastMCP("mcp_browser_use")
 #endregion
 
+
+#beginregion ContextPack
+from mcp_browser_use.helpers_context import pack_from_snapshot_dict
+import json as _json
+
+async def _to_context_pack(result_json: str, return_mode: str, cleaning_level: int, token_budget=1000) -> str:
+    """
+    Convert a helper's raw JSON result into a JSON-serialized ContextPack envelope.
+
+    Parses a helper response (typically including a "snapshot" dict and auxiliary fields),
+    normalizes `return_mode`, fetches current page metadata, and produces a size-controlled,
+    structured ContextPack. Any non-snapshot fields from the helper are surfaced under
+    the ContextPack's auxiliary section (e.g., `mixed`). Helper-reported errors (e.g.,
+    ok=false) are surfaced in `errors`.
+
+    Args:
+        result_json: JSON string returned by a helper call (must parse to a dict).
+        return_mode: Desired snapshot representation {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
+
+    Returns:
+        str: JSON-serialized ContextPack.
+
+    Raises:
+        TypeError: If `result_json` is not valid JSON or is not a dict after parsing.
+        ValueError: If `return_mode` is invalid (normalized internally to a default).
+    """
+    try:
+        obj = _json.loads(result_json)
+    except Exception:
+        raise TypeError(f"helper returned non-JSON: {type(result_json)}")
+
+    # Normalize/validate return_mode
+    mode = (return_mode or "outline").lower()
+    if mode not in {"html", "text", "outline", "dompaths", "mixed"}:
+        mode = "outline"
+
+    try:
+        meta = await MBU.helpers.get_current_page_meta()
+    except Exception:
+        meta = {"url": None, "title": None, "window_tag": None}
+
+    snap = obj.get("snapshot")
+    if not isinstance(snap, dict):
+        snap = {"url": meta.get("url"), "title": meta.get("title"), "html": ""}
+
+    cp = pack_from_snapshot_dict(
+        snapshot=snap,
+        window_tag=meta.get("window_tag"),
+        return_mode=mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+    )
+
+    # Surface errors in a first-class place
+    if obj.get("ok") is False:
+        try:
+            cp.errors.append({
+                "type": obj.get("error") or "error",
+                "summary": obj.get("summary"),
+                "details": {k: v for k, v in obj.items() if k != "snapshot"},
+            })
+        except Exception:
+            pass
+
+    leftovers = {k: v for k, v in obj.items() if k != "snapshot"}
+    cp.mixed = leftovers
+
+    return _json.dumps(cp, default=lambda o: getattr(o, "__dict__", repr(o)), ensure_ascii=False)
+#endregion
+
 #region Tools -- Navigation
 @mcp.tool()
 @tool_envelope
 @exclusive_browser_access
-async def mcp_browser_use__start_browser() -> str:
+async def mcp_browser_use__start_browser(
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 10_000,
+) -> str:
     """
     Start a browser session or open a new window in an existing session.
 
-    If no browser is running, starts a new Chrome browser with the configured profile.
-    If a browser is already running, opens a new window in the existing session.
-    Each MCP agent gets its own browser window, allowing multiple agents to work
-    independently while sharing the same browser profile (e.g., for persistent logins).
-
     Returns:
-        str: Success message with browser initialization details and HTML snapshot
+        ContextPack JSON
     """
-    return await MBU.helpers.start_browser()
+    result = await MBU.helpers.start_browser()
+    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
 
 @mcp.tool()
 @tool_envelope
@@ -251,19 +329,42 @@ async def mcp_browser_use__start_browser() -> str:
 @ensure_driver_ready
 async def mcp_browser_use__navigate_to_url(
     url: str,
-    timeout: float = 30.0
+    wait_for: str = "load",
+    timeout_sec: int = 30,
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
 ) -> str:
     """
-    Navigate the browser to a specified URL.
+    MCP tool: Navigate the current tab to the given URL and return a ContextPack snapshot.
+
+    Loads the specified URL in the active window/tab and waits for the main document
+    to be ready before capturing the snapshot.
 
     Args:
-        url: The URL to navigate to (must be a valid HTTP/HTTPS URL)
-        timeout: Maximum time in seconds to wait for page load (default: 30.0)
+        url: Absolute URL to navigate to (e.g., "https://example.com").
+        timeout: Maximum time (seconds) to wait for navigation readiness.
+        return_mode: Controls the content type in the ContextPack snapshot. One of
+            {"outline", "text", "html", "dompaths", "mixed"}.
+        cleaning_level: Structural/content cleaning intensity for snapshot rendering.
+            0 = none, 1 = light, 2 = default, 3 = aggressive.
+        token_budget: Approximate token cap for the returned snapshot.
 
     Returns:
-        str: Success message with the page title and HTML snapshot of the loaded page
+        str: JSON-serialized ContextPack with post-navigation snapshot.
+
+    Raises:
+        TimeoutError: If the page fails to load within `timeout`.
+        ValueError: If `url` is invalid or `return_mode` is invalid.
+        RuntimeError: If the browser/driver is not ready.
+
+    Notes:
+        - The snapshot reflects the DOM after the initial load. If the site performs
+          heavy client-side hydration, consider waiting for a specific element with
+          `wait_for_element` before subsequent actions.
     """
-    return await MBU.helpers.navigate_to_url(url=url, timeout=timeout)
+    result = await MBU.helpers.navigate_to_url(url=url, wait_for=wait_for, timeout_sec=timeout_sec)
+    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
 
 @mcp.tool()
 @tool_envelope
@@ -279,32 +380,44 @@ async def mcp_browser_use__fill_text(
     iframe_selector_type: str = "css",
     shadow_root_selector: Optional[str] = None,
     shadow_root_selector_type: str = "css",
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
 ) -> str:
     """
-    Fill text into an input field on the page, with support for iframes and shadow DOM.
+    MCP tool: Set the value of an input/textarea and return a ContextPack snapshot.
 
-    Note: For multi-step iframe interactions, specify iframe_selector in each call.
-    Browser context resets after each action for reliability.
+    Focuses the target element, optionally clears existing content, and inserts `text`.
 
     Args:
-        selector: CSS selector, XPath, or ID of the input field
-        text: Text to enter into the field
-        selector_type: Type of selector - 'css', 'xpath', or 'id' (default: 'css')
-        clear_first: Whether to clear the field before entering text (default: True)
-        timeout: Maximum time in seconds to wait for the element (default: 10.0)
-        iframe_selector: Optional selector for iframe containing the element
-        iframe_selector_type: Selector type for the iframe - 'css', 'xpath', or 'id' (default: 'css')
-        shadow_root_selector: Optional selector for shadow root containing the element
-        shadow_root_selector_type: Selector type for the shadow root - 'css', 'xpath', or 'id' (default: 'css')
+        selector: Element locator (CSS or XPath).
+        text: The exact text to set.
+        selector_type: One of {"css", "xpath"}.
+        clear_first: If True, clear any existing value before typing.
+        click_to_focus: If True, click the element to focus before typing.
+        timeout: Maximum time (seconds) to locate and interact with the element.
+        iframe_selector: Optional iframe locator containing the element.
+        iframe_selector_type: One of {"css", "xpath"}.
+        shadow_root_selector: Optional shadow root host locator.
+        shadow_root_selector_type: One of {"css", "xpath"}.
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
 
     Returns:
-        str: Success message with HTML snapshot after filling the text
+        str: JSON-serialized ContextPack with post-input snapshot.
 
-    Note:
-        If this fails due to captchas or visibility issues, ask the user to manually
-        complete the action (e.g., logging in) and then continue with the next steps.
+    Raises:
+        TimeoutError: If the element is not ready within `timeout`.
+        LookupError: If the selector cannot be resolved.
+        ValueError: If `selector_type` or `return_mode` is invalid.
+        RuntimeError: If the browser/driver is not ready.
+
+    Notes:
+        - Use `send_keys` for complex sequences or special keys.
+        - For masked inputs or JS-only fields, consider `force_js` variants if available.
     """
-    snapshot = await MBU.helpers.fill_text(
+    result = await MBU.helpers.fill_text(
         selector=selector,
         text=text,
         selector_type=selector_type,
@@ -315,11 +428,7 @@ async def mcp_browser_use__fill_text(
         shadow_root_selector=shadow_root_selector,
         shadow_root_selector_type=shadow_root_selector_type,
     )
-
-    if not isinstance(snapshot, str):
-        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
-
-    return snapshot
+    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
 
 @mcp.tool()
 @tool_envelope
@@ -334,27 +443,46 @@ async def mcp_browser_use__click_element(
     iframe_selector_type: str = "css",
     shadow_root_selector: Optional[str] = None,
     shadow_root_selector_type: str = "css",
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
 ) -> str:
     """
-    Click an element on the page, with support for iframes and shadow DOM.
+    MCP tool: Click an element (optionally inside an iframe or shadow root) and return a snapshot.
 
-    Note: For multi-step iframe interactions, specify iframe_selector in each call.
-    Browser context resets after each action for reliability.
+    Attempts a native WebDriver click by default; optionally falls back to JS-based click
+    if `force_js` is True or native click is not possible.
 
     Args:
-        selector: CSS selector, XPath, or ID of the element to click
-        selector_type: Type of selector - 'css', 'xpath', or 'id' (default: 'css')
-        timeout: Maximum time in seconds to wait for the element to be clickable (default: 10.0)
-        force_js: If True, uses JavaScript to click instead of Selenium's native click (default: False)
-        iframe_selector: Optional selector for iframe containing the element
-        iframe_selector_type: Selector type for the iframe - 'css', 'xpath', or 'id' (default: 'css')
-        shadow_root_selector: Optional selector for shadow root containing the element
-        shadow_root_selector_type: Selector type for the shadow root - 'css', 'xpath', or 'id' (default: 'css')
+        selector: Element locator (CSS or XPath).
+        selector_type: How to interpret `selector`. One of {"css", "xpath"}.
+        timeout: Maximum time (seconds) to locate a clickable element.
+        force_js: If True, use JavaScript-based click instead of native click.
+        iframe_selector: Optional locator of an iframe that contains the target element.
+        iframe_selector_type: One of {"css", "xpath"}; applies to `iframe_selector`.
+        shadow_root_selector: Optional locator whose shadowRoot contains the target element.
+        shadow_root_selector_type: One of {"css", "xpath"}; applies to `shadow_root_selector`.
+        return_mode: Controls the content type in the ContextPack snapshot.
+            {"outline", "text", "html", "dompaths", "mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
 
     Returns:
-        str: Success message with the current URL, page title, and HTML snapshot after clicking
+        str: JSON-serialized ContextPack with the snapshot after the click.
+
+    Raises:
+        TimeoutError: If the element is not clickable within `timeout`.
+        LookupError: If the selector cannot be resolved.
+        ValueError: If any selector_type is invalid or `return_mode` is invalid.
+        RuntimeError: If the browser/driver is not ready.
+
+    Notes:
+        - If both `iframe_selector` and `shadow_root_selector` are provided, the function
+          will first resolve the iframe context, then the shadow root context.
+        - Some sites block native clicks; `force_js=True` can bypass those cases, but
+          it may not trigger all browser-level side effects (e.g., focus).
     """
-    snapshot = await MBU.helpers.click_element(
+    result = await MBU.helpers.click_element(
         selector=selector,
         selector_type=selector_type,
         timeout=timeout,
@@ -364,11 +492,7 @@ async def mcp_browser_use__click_element(
         shadow_root_selector=shadow_root_selector,
         shadow_root_selector_type=shadow_root_selector_type,
     )
-
-    if not isinstance(snapshot, str):
-        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
-    
-    return  snapshot
+    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
 
 @mcp.tool()
 @tool_envelope
@@ -379,37 +503,52 @@ async def mcp_browser_use__take_screenshot(
     return_base64: bool = False,
     return_snapshot: bool = False,
     thumbnail_width: Optional[int] = None,
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
 ) -> str:
-    """
-    Take a screenshot of the current page.
-
-    Args:
-        screenshot_path: Optional path to save the full screenshot
-        return_base64: Whether to return base64 encoded thumbnail (default: False)
-        return_snapshot: Whether to return page HTML snapshot (default: False)
-        thumbnail_width: Optional width in pixels for thumbnail (default: 200px if return_base64=True)
-                        Minimum: 50px. Only used when return_base64=True.
-                        Note: 200px accounts for MCP protocol overhead to stay under 25K token limit.
-    """
-    snapshot = await MBU.helpers.take_screenshot(
+    result = await MBU.helpers.take_screenshot(
         screenshot_path=screenshot_path,
         return_base64=return_base64,
         return_snapshot=return_snapshot,
         thumbnail_width=thumbnail_width,
     )
-
-    if not isinstance(snapshot, str):
-        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
-
-    return snapshot
+    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
 #endregion
 
 #region Tools -- Debugging
 @mcp.tool()
 @tool_envelope
-async def mcp_browser_use__get_debug_diagnostics_info() -> str:
+async def mcp_browser_use__get_debug_diagnostics_info(
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
+) -> str:
+    """
+    MCP tool: Collect driver/browser diagnostics and return a ContextPack.
+
+    Captures diagnostics such as driver session info, user agent, window size, active
+    targets, and other implementation-specific debug fields. Diagnostics are included
+    in the ContextPack's auxiliary section (e.g., `mixed.diagnostics`).
+
+    Args:
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
+
+    Returns:
+        str: JSON-serialized ContextPack including diagnostics in `mixed`.
+
+    Raises:
+        RuntimeError: If diagnostics cannot be collected.
+        ValueError: If `return_mode` is invalid.
+
+    Notes:
+        - Useful for troubleshooting issues such as stale sessions, blocked popups,
+          or failed navigation. Avoid exposing sensitive values in logs.
+    """
     diagnostics = await MBU.helpers.get_debug_diagnostics_info()
-    return diagnostics
+    return await _to_context_pack(diagnostics, return_mode, cleaning_level, token_budget)
         
 @mcp.tool()
 @tool_envelope
@@ -425,22 +564,11 @@ async def mcp_browser_use__debug_element(
     shadow_root_selector_type: str = "css",
     max_html_length: int = 5000,
     include_html: bool = True,
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
 ) -> str:
-    """
-    Debug an element on the page.
-
-    Args:
-        selector: CSS selector, XPath, or ID of the element
-        selector_type: Type of selector (css, xpath, id)
-        timeout: Maximum time to wait for element
-        iframe_selector: Optional iframe selector
-        iframe_selector_type: Iframe selector type
-        shadow_root_selector: Optional shadow root selector
-        shadow_root_selector_type: Shadow root selector type
-        max_html_length: Maximum length of outerHTML to return (default: 5000 chars)
-        include_html: Whether to include HTML in response (default: True)
-    """
-    debug_info = await MBU.helpers.debug_element(
+    result = await MBU.helpers.debug_element(
         selector=selector,
         selector_type=selector_type,
         timeout=timeout,
@@ -451,7 +579,7 @@ async def mcp_browser_use__debug_element(
         max_html_length=max_html_length,
         include_html=include_html,
     )
-    return debug_info
+    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
 #endregion
 
 #region Tools -- Session management
@@ -468,6 +596,23 @@ async def mcp_browser_use__unlock_browser() -> str:
 async def mcp_browser_use__close_browser() -> str:
     close_browser_info = await MBU.helpers.close_browser()
     return close_browser_info
+
+@mcp.tool()
+@tool_envelope
+async def mcp_browser_use__force_close_all_chrome() -> str:
+    """
+    Force close all Chrome processes and clean up all state.
+
+    Use this to recover from stuck Chrome instances or when normal close_browser fails.
+    This will:
+    - Quit the Selenium driver
+    - Kill all Chrome processes using the MCP profile
+    - Clean up lock files and global state
+
+    Returns:
+        str: JSON with status, killed process IDs, and any errors encountered
+    """
+    return await MBU.helpers.force_close_all_chrome()
 #endregion
 
 #region Tools -- Page interaction
@@ -475,20 +620,44 @@ async def mcp_browser_use__close_browser() -> str:
 @tool_envelope
 @exclusive_browser_access
 @ensure_driver_ready
-async def mcp_browser_use__scroll(x: int = 0, y: int = 0) -> str:
+async def mcp_browser_use__scroll(
+    x: int = 0,
+    y: int = 0,
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 1_000,
+) -> str:
     """
-    Scroll the page by the specified pixel amounts.
+    MCP tool: Scroll the page or bring an element into view, then return a snapshot.
+
+    If `selector` is provided, the element is scrolled into view. Otherwise the viewport
+    is scrolled by the given pixel deltas (`dx`, `dy`).
 
     Args:
-        x: Horizontal scroll amount in pixels (positive = right, negative = left)
-        y: Vertical scroll amount in pixels (positive = down, negative = up)
+        dx: Horizontal pixels to scroll (+right / -left) when no selector is given.
+        dy: Vertical pixels to scroll (+down / -up) when no selector is given.
+        selector: Optional element to scroll into view instead of pixel-based scroll.
+        selector_type: One of {"css", "xpath"}; applies to `selector`.
+        smooth: If True, perform a smooth scroll animation (if supported).
+        timeout: Maximum time (seconds) to locate the `selector` when provided.
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Optional approximate token cap for the returned snapshot.
+
+    Returns:
+        str: JSON-serialized ContextPack with post-scroll snapshot.
+
+    Raises:
+        TimeoutError: If `selector` is provided but not found within `timeout`.
+        ValueError: If `selector_type` or `return_mode` is invalid.
+        RuntimeError: If the browser/driver is not ready.
+
+    Notes:
+        - Some sticky headers may cover targets scrolled into view; consider an offset
+          if your implementation supports it.
     """
-    snapshot = await MBU.helpers.scroll(x=x, y=y)
-
-    if not isinstance(snapshot, str):
-        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
-
-    return snapshot
+    result = await MBU.helpers.scroll(x=x, y=y)
+    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
 
 @mcp.tool()
 @tool_envelope
@@ -499,27 +668,48 @@ async def mcp_browser_use__send_keys(
     selector: Optional[str] = None,
     selector_type: str = "css",
     timeout: float = 10.0,
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 1_000,
 ) -> str:
     """
-    Send keyboard keys to an element or to the active element.
+    MCP tool: Send key strokes to an element and return a ContextPack snapshot.
+
+    Useful for submitting forms (e.g., Enter) or sending special keys (e.g., Tab, Escape).
 
     Args:
-        key: Key to send (ENTER, TAB, ESCAPE, ARROW_DOWN, etc.)
-        selector: Optional CSS selector, XPath, or ID of element to send keys to
-        selector_type: Type of selector (css, xpath, id)
-        timeout: Maximum time to wait for element in seconds
+        selector: Element locator (CSS or XPath).
+        keys: A string or list of key tokens to send. Special keys can be supported by
+            name (e.g., "ENTER", "TAB", "ESCAPE") depending on implementation.
+        selector_type: One of {"css", "xpath"}.
+        timeout: Maximum time (seconds) to locate and focus the element.
+        iframe_selector: Optional iframe locator containing the element.
+        iframe_selector_type: One of {"css", "xpath"}.
+        shadow_root_selector: Optional shadow root host locator.
+        shadow_root_selector_type: One of {"css", "xpath"}.
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
+
+    Returns:
+        str: JSON-serialized ContextPack with snapshot after key events.
+
+    Raises:
+        TimeoutError: If the element is not ready within `timeout`.
+        LookupError: If the selector cannot be resolved.
+        ValueError: If `selector_type` or `return_mode` is invalid.
+        RuntimeError: If the browser/driver is not ready.
+
+    Notes:
+        - Combine with `wait_for_element` to ensure predictable post-typing state.
     """
-    snapshot = await MBU.helpers.send_keys(
+    result = await MBU.helpers.send_keys(
         key=key,
         selector=selector,
         selector_type=selector_type,
         timeout=timeout,
     )
-
-    if not isinstance(snapshot, str):
-        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
-
-    return snapshot
+    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
 
 @mcp.tool()
 @tool_envelope
@@ -532,19 +722,38 @@ async def mcp_browser_use__wait_for_element(
     condition: str = "visible",
     iframe_selector: Optional[str] = None,
     iframe_selector_type: str = "css",
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 1_000,
 ) -> str:
     """
-    Wait for an element to meet a specific condition.
+    MCP tool: Wait for an element to appear (and optionally be visible) and return a snapshot.
+
+    Polls for the presence of the element and (if `visible=True`) a visible display state.
 
     Args:
-        selector: CSS selector, XPath, or ID of the element
-        selector_type: Type of selector (css, xpath, id)
-        timeout: Maximum time to wait in seconds
-        condition: Condition to wait for - 'present', 'visible', or 'clickable'
-        iframe_selector: Optional selector for iframe containing the element
-        iframe_selector_type: Selector type for the iframe
+        selector: Element locator (CSS or XPath).
+        selector_type: One of {"css", "xpath"}.
+        visible: If True, require that the element is visible (not just present).
+        timeout: Maximum time (seconds) to wait.
+        iframe_selector: Optional iframe locator containing the element.
+        iframe_selector_type: One of {"css", "xpath"}.
+        shadow_root_selector: Optional shadow root host locator.
+        shadow_root_selector_type: One of {"css", "xpath"}.
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
+
+    Returns:
+        str: JSON-serialized ContextPack capturing the page after the wait condition.
+
+    Raises:
+        TimeoutError: If the condition is not met within `timeout`.
+        LookupError: If the selector context cannot be resolved.
+        ValueError: If `selector_type` or `return_mode` is invalid.
+        RuntimeError: If the browser/driver is not ready.
     """
-    snapshot = await MBU.helpers.wait_for_element(
+    result = await MBU.helpers.wait_for_element(
         selector=selector,
         selector_type=selector_type,
         timeout=timeout,
@@ -552,11 +761,7 @@ async def mcp_browser_use__wait_for_element(
         iframe_selector=iframe_selector,
         iframe_selector_type=iframe_selector_type,
     )
-
-    if not isinstance(snapshot, str):
-        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
-
-    return snapshot
+    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
 #endregion
 
 #region Tools -- Cookie management
@@ -564,14 +769,31 @@ async def mcp_browser_use__wait_for_element(
 @tool_envelope
 @exclusive_browser_access
 @ensure_driver_ready
-async def mcp_browser_use__get_cookies() -> str:
-    """Get all cookies for the current page/domain."""
-    snapshot = await MBU.helpers.get_cookies()
+async def mcp_browser_use__get_cookies(
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 1,
+) -> str:
+    """
+    MCP tool: Get all cookies for the current page and return a ContextPack.
 
-    if not isinstance(snapshot, str):
-        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
+    The cookies list is included in the ContextPack's auxiliary section (e.g., `mixed.cookies`).
+    The snapshot represents the current page (as per `return_mode`).
 
-    return snapshot
+    Args:
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Optional approximate token cap for the returned snapshot.
+
+    Returns:
+        str: JSON-serialized ContextPack with cookies included in `mixed`.
+
+    Raises:
+        RuntimeError: If the browser/driver is not ready.
+        ValueError: If `return_mode` is invalid.
+    """
+    result = await MBU.helpers.get_cookies()
+    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
 
 @mcp.tool()
 @tool_envelope
@@ -585,51 +807,70 @@ async def mcp_browser_use__add_cookie(
     secure: bool = False,
     http_only: bool = False,
     expiry: Optional[int] = None,
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 200,
 ) -> str:
     """
-    Add a cookie to the browser.
+    MCP tool: Add a cookie to the current page context and return a ContextPack.
 
     Args:
-        name: Cookie name
-        value: Cookie value
-        domain: Optional domain for the cookie (defaults to current domain)
-        path: Cookie path (default: "/")
-        secure: Whether cookie should only be sent over HTTPS
-        http_only: Whether cookie should be HTTP-only
-        expiry: Optional expiry timestamp (Unix epoch seconds)
+        name: Cookie name.
+        value: Cookie value.
+        domain: Optional domain (defaults to current page domain if omitted).
+        path: Cookie path (default "/").
+        secure: Mark cookie as Secure.
+        http_only: Mark cookie as HttpOnly.
+        same_site: SameSite policy, e.g. {"Lax", "Strict", "None"}.
+        expires: Unix epoch seconds for expiration (or None for session cookie).
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
+
+    Returns:
+        str: JSON-serialized ContextPack including an acknowledgement and updated cookie info
+        in `mixed` (e.g., `mixed.cookie_added`, `mixed.cookies`).
+
+    Raises:
+        ValueError: If parameters are invalid (e.g., unsupported SameSite).
+        RuntimeError: If the browser/driver is not ready or operation fails.
     """
-    snapshot = await MBU.helpers.add_cookie(
-        name=name,
-        value=value,
-        domain=domain,
-        path=path,
-        secure=secure,
-        http_only=http_only,
-        expiry=expiry,
+    result = await MBU.helpers.add_cookie(
+        name=name, value=value, domain=domain, path=path, secure=secure, http_only=http_only, expiry=expiry
     )
-
-    if not isinstance(snapshot, str):
-        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
-
-    return snapshot
+    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
 
 @mcp.tool()
 @tool_envelope
 @exclusive_browser_access
 @ensure_driver_ready
-async def mcp_browser_use__delete_cookie(name: str) -> str:
+async def mcp_browser_use__delete_cookie(
+    name: str,
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 200,
+) -> str:
     """
-    Delete a specific cookie by name.
+    MCP tool: Delete a cookie by name (and optional domain/path) and return a ContextPack.
 
     Args:
-        name: Name of the cookie to delete
+        name: Cookie name to remove.
+        domain: Optional domain filter if multiple cookies share the same name.
+        path: Path to target (default "/").
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
+
+    Returns:
+        str: JSON-serialized ContextPack including an acknowledgement in `mixed`
+        (e.g., `mixed.cookie_deleted`) and a snapshot of the current page.
+
+    Raises:
+        RuntimeError: If the browser/driver is not ready or operation fails.
+        ValueError: If `return_mode` is invalid.
     """
-    snapshot = await MBU.helpers.delete_cookie(name=name)
-
-    if not isinstance(snapshot, str):
-        raise TypeError(f"snapshot is not string, is type {type(snapshot)}, content: {snapshot}")
-
-    return snapshot
+    result = await MBU.helpers.delete_cookie(name=name)
+    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
 #endregion
 
 if __name__ == "__main__":

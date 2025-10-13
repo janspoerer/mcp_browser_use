@@ -37,6 +37,8 @@ def pack_snapshot(
     return_mode: str,
     cleaning_level: int,
     token_budget: Optional[int],
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
 ) -> ContextPack:
     cp = ContextPack(
         window_tag=window_tag,
@@ -62,6 +64,10 @@ def pack_snapshot(
         return cp
 
     if return_mode == ReturnMode.HTML:
+        # Apply html_offset if specified (for pagination through large HTML content)
+        if html_offset and html_offset > 0:
+            cleaned_html = cleaned_html[html_offset:]
+
         # Respect token budget by truncating cleaned_html conservatively
         if token_budget:
             # Convert tokens -> chars budget ~4 chars/token
@@ -80,6 +86,11 @@ def pack_snapshot(
             txt = BeautifulSoup(cleaned_html, "html.parser").get_text("\n", strip=True)
         except Exception:
             txt = ""
+
+        # Apply text_offset if specified (for pagination through large content)
+        if text_offset and text_offset > 0:
+            txt = txt[text_offset:]
+
         if token_budget:
             char_budget = token_budget * 4
             if len(txt) > char_budget:
@@ -104,6 +115,8 @@ def pack_from_snapshot_dict(
     return_mode: str,
     cleaning_level: int,
     token_budget: Optional[int],
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
 ):
     """
     Build a ContextPack object from a raw snapshot dict and packing controls.
@@ -116,13 +129,29 @@ def pack_from_snapshot_dict(
         snapshot: Raw snapshot dict (e.g., {"url", "title", "html", ...}).
         window_tag: Optional identifier for the active window/tab.
         return_mode: Target representation to materialize in the ContextPack.
+            {"outline", "text", "html", "dompaths", "mixed"}
         cleaning_level: Structural/content cleaning intensity (0–3).
         token_budget: Optional approximate token cap for the returned snapshot.
+        text_offset: Optional character offset to skip at the start of text (for pagination).
+            Only used when return_mode="text".
+        html_offset: Optional character offset to skip at the start of HTML (for pagination).
+            Only used when return_mode="html".
 
     Returns:
         ContextPack: The structured envelope ready for JSON serialization.
 
     Notes:
+        - **Processing order**:
+          1. Clean HTML (remove noise based on cleaning_level)
+          2. Apply offset (skip first N chars)
+          3. Apply token_budget (truncate to fit)
+
+        - **Offset behavior**:
+          - Applied to cleaned content, not raw HTML
+          - Character-based, not token-based
+          - If offset exceeds content length, returns empty string
+          - Use consistent cleaning_level across paginated calls
+
         - Consider computing a `page_fingerprint` (e.g., sha256 of cleaned html) to assist
           agents in cheap change detection between steps.
     """
@@ -134,4 +163,6 @@ def pack_from_snapshot_dict(
         return_mode=return_mode,
         cleaning_level=cleaning_level,
         token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset,
     )

@@ -1,3 +1,4 @@
+#region Overview
 """
 ## Known Limitation: Iframe Context
 
@@ -7,8 +8,6 @@ This is intentional design to prevent context state bugs.
 ## Price, Stock Quantity, and Delivery Times
 
 If you cannot see detailed prices, stock quanities, and delivery times and you suspect that data might be available behind a login, please ask Jan on Slack for help. He can probably log you in.
-
-
 
 ## Performance Considerations
 
@@ -28,10 +27,7 @@ establishes a separate MCP server connection and does the same.
 Then the first agent is done with his work and closes the connection. 
 The second continues working. In this rubber duck 
 journey, is there anything that does not work well?
-"""
 
-#region Overview
-"""
 The MCP should allow multiple browser windows to be opened. Each AI agent can call the "start_browser" tool. If the browser is not open at all, it is opened, using the specified persistent user profile. If a browser is already open, so if the second agent calls "start_browser", a new window is opened. Each agent only uses their own window. The windows are identified by tags.
 
 When an agent performs an action, the browser should be briefly locked until 10 seconds are over or until the agent unlocks the browser. This can be done with a lock file.
@@ -53,8 +49,13 @@ When a second agent opens a browser, the agent gets its own browser window. IT M
 
 ## Feature Highlights
 
-* **HTML Truncation:** The MCP allows you to configure truncation of the HTML pages. Other scraping MCPs may overwhelm the AI with accessibility snapshots or HTML dumps that are larger than the context window. This MCP will help you to manage the maximum page size by setting the `MCP_MAX_SNAPSHOT_CHARS` environment variable.
-* **Multiple Browser Windows and Multiple Agents:** You can connect multiple agents to this MCP independently, without requiring coordination on behalf of the agents. Each agent can work with **the same** browser profile, which is helpful when logins should persist across agents. Each agent gets their own browser window, so they do not interfere with each other. 
+* **Content Pagination:** The MCP supports paginating through large HTML pages using `html_offset` (for HTML mode) and `text_offset` (for TEXT mode). When pages exceed token limits, agents can make multiple calls with increasing offsets to retrieve all content. The offset is applied to cleaned content (after removing scripts/styles/ads), enabling efficient pagination through content-rich pages. Check the `hard_capped` flag in responses to detect truncation.
+
+* **HTML Truncation & Token Management:** The MCP allows you to configure truncation of HTML pages via `token_budget` parameter on all tools. Other scraping MCPs may overwhelm the AI with accessibility snapshots or HTML dumps that are larger than the context window. This MCP provides precise control over snapshot size through configurable token budgets and cleaning levels.
+
+* **Multiple Browser Windows and Multiple Agents:** You can connect multiple agents to this MCP independently, without requiring coordination on behalf of the agents. Each agent can work with **the same** browser profile, which is helpful when logins should persist across agents. Each agent gets their own browser window, so they do not interfere with each other.
+
+* **Flexible Snapshot Modes:** Every tool returns configurable snapshots in multiple formats: `outline` (headings), `text` (extracted text), `html` (cleaned HTML), `dompaths` (element paths), or `mixed` (combination). Choose the representation that best fits your use case.
 
 
 """
@@ -238,7 +239,7 @@ mcp = FastMCP("mcp_browser_use")
 from mcp_browser_use.helpers_context import pack_from_snapshot_dict
 import json as _json
 
-async def _to_context_pack(result_json: str, return_mode: str, cleaning_level: int, token_budget=1000) -> str:
+async def _to_context_pack(result_json: str, return_mode: str, cleaning_level: int, token_budget=1000, text_offset: Optional[int] = None, html_offset: Optional[int] = None) -> str:
     """
     Convert a helper's raw JSON result into a JSON-serialized ContextPack envelope.
 
@@ -253,6 +254,8 @@ async def _to_context_pack(result_json: str, return_mode: str, cleaning_level: i
         return_mode: Desired snapshot representation {"outline","text","html","dompaths","mixed"}.
         cleaning_level: Structural/content cleaning intensity (0–3).
         token_budget: Approximate token cap for the returned snapshot.
+        text_offset: Optional character offset for text mode pagination.
+        html_offset: Optional character offset for html mode pagination.
 
     Returns:
         str: JSON-serialized ContextPack.
@@ -286,6 +289,8 @@ async def _to_context_pack(result_json: str, return_mode: str, cleaning_level: i
         return_mode=mode,
         cleaning_level=cleaning_level,
         token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset,
     )
 
     # Surface errors in a first-class place
@@ -312,7 +317,7 @@ async def _to_context_pack(result_json: str, return_mode: str, cleaning_level: i
 async def mcp_browser_use__start_browser(
     return_mode: str = "outline",
     cleaning_level: int = 2,
-    token_budget: int = 10_000,
+    token_budget: int = 5_000,
 ) -> str:
     """
     Start a browser session or open a new window in an existing session.
@@ -321,7 +326,12 @@ async def mcp_browser_use__start_browser(
         ContextPack JSON
     """
     result = await MBU.helpers.start_browser()
-    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget
+    )
 
 @mcp.tool()
 @tool_envelope
@@ -334,6 +344,8 @@ async def mcp_browser_use__navigate_to_url(
     return_mode: str = "outline",
     cleaning_level: int = 2,
     token_budget: int = 5_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
 ) -> str:
     """
     MCP tool: Navigate the current tab to the given URL and return a ContextPack snapshot.
@@ -343,12 +355,20 @@ async def mcp_browser_use__navigate_to_url(
 
     Args:
         url: Absolute URL to navigate to (e.g., "https://example.com").
-        timeout: Maximum time (seconds) to wait for navigation readiness.
+        wait_for: Wait condition - "load" (default) or "complete".
+        timeout_sec: Maximum time (seconds) to wait for navigation readiness.
         return_mode: Controls the content type in the ContextPack snapshot. One of
             {"outline", "text", "html", "dompaths", "mixed"}.
         cleaning_level: Structural/content cleaning intensity for snapshot rendering.
             0 = none, 1 = light, 2 = default, 3 = aggressive.
         token_budget: Approximate token cap for the returned snapshot.
+        text_offset: Optional character offset to start text extraction (for pagination).
+            Only applies when return_mode="text".
+            Example: Use text_offset=10000 to skip the first 10,000 characters.
+        html_offset: Optional character offset to start HTML extraction (for pagination).
+            Only applies when return_mode="html".
+            Example: Use html_offset=50000 to skip the first 50,000 characters of cleaned HTML.
+            Note: Offset is applied AFTER cleaning_level processing but BEFORE token_budget truncation.
 
     Returns:
         str: JSON-serialized ContextPack with post-navigation snapshot.
@@ -362,9 +382,42 @@ async def mcp_browser_use__navigate_to_url(
         - The snapshot reflects the DOM after the initial load. If the site performs
           heavy client-side hydration, consider waiting for a specific element with
           `wait_for_element` before subsequent actions.
+        - **Pagination Strategy for Large Pages:**
+          When dealing with pages that exceed token limits, use offset parameters to paginate:
+
+          1. First call: Set return_mode="html", token_budget=50000, no offset
+             - Check response for `hard_capped=true` to detect truncation
+
+          2. Subsequent calls: Use html_offset to continue from where you left off
+             - Example: html_offset=200000 (50000 tokens * 4 chars/token)
+             - Continue until you receive less content than token_budget
+
+          3. For TEXT mode pagination, use text_offset with return_mode="text"
+
+        - **Important:** The offset is applied to the cleaned HTML (after removing scripts,
+          styles, and noise), not the raw HTML. This means you're paginating through
+          content-rich HTML only.
+
+        - **Token Budget Interaction:**
+          - Cleaning happens first (scripts/styles/noise removed)
+          - Then html_offset is applied (skip first N chars)
+          - Finally token_budget truncates the remaining content
+
+        - **Use Cases:**
+          - Product catalogs with 1000+ items
+          - Long documentation pages
+          - Search results with many pages loaded via infinite scroll
+          - Large data tables with 10,000+ rows
     """
     result = await MBU.helpers.navigate_to_url(url=url, wait_for=wait_for, timeout_sec=timeout_sec)
-    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
 
 @mcp.tool()
 @tool_envelope
@@ -383,6 +436,8 @@ async def mcp_browser_use__fill_text(
     return_mode: str = "outline",
     cleaning_level: int = 2,
     token_budget: int = 5_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
 ) -> str:
     """
     MCP tool: Set the value of an input/textarea and return a ContextPack snapshot.
@@ -428,7 +483,14 @@ async def mcp_browser_use__fill_text(
         shadow_root_selector=shadow_root_selector,
         shadow_root_selector_type=shadow_root_selector_type,
     )
-    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
 
 @mcp.tool()
 @tool_envelope
@@ -446,6 +508,8 @@ async def mcp_browser_use__click_element(
     return_mode: str = "outline",
     cleaning_level: int = 2,
     token_budget: int = 5_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
 ) -> str:
     """
     MCP tool: Click an element (optionally inside an iframe or shadow root) and return a snapshot.
@@ -492,7 +556,14 @@ async def mcp_browser_use__click_element(
         shadow_root_selector=shadow_root_selector,
         shadow_root_selector_type=shadow_root_selector_type,
     )
-    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
 
 @mcp.tool()
 @tool_envelope
@@ -506,6 +577,8 @@ async def mcp_browser_use__take_screenshot(
     return_mode: str = "outline",
     cleaning_level: int = 2,
     token_budget: int = 5_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
 ) -> str:
     result = await MBU.helpers.take_screenshot(
         screenshot_path=screenshot_path,
@@ -513,7 +586,14 @@ async def mcp_browser_use__take_screenshot(
         return_snapshot=return_snapshot,
         thumbnail_width=thumbnail_width,
     )
-    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
 #endregion
 
 #region Tools -- Debugging
@@ -523,6 +603,8 @@ async def mcp_browser_use__get_debug_diagnostics_info(
     return_mode: str = "outline",
     cleaning_level: int = 2,
     token_budget: int = 5_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
 ) -> str:
     """
     MCP tool: Collect driver/browser diagnostics and return a ContextPack.
@@ -548,7 +630,14 @@ async def mcp_browser_use__get_debug_diagnostics_info(
           or failed navigation. Avoid exposing sensitive values in logs.
     """
     diagnostics = await MBU.helpers.get_debug_diagnostics_info()
-    return await _to_context_pack(diagnostics, return_mode, cleaning_level, token_budget)
+    return await _to_context_pack(
+        result_json=diagnostics,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
         
 @mcp.tool()
 @tool_envelope
@@ -567,6 +656,8 @@ async def mcp_browser_use__debug_element(
     return_mode: str = "outline",
     cleaning_level: int = 2,
     token_budget: int = 5_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
 ) -> str:
     result = await MBU.helpers.debug_element(
         selector=selector,
@@ -579,7 +670,14 @@ async def mcp_browser_use__debug_element(
         max_html_length=max_html_length,
         include_html=include_html,
     )
-    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
 #endregion
 
 #region Tools -- Session management
@@ -626,6 +724,8 @@ async def mcp_browser_use__scroll(
     return_mode: str = "outline",
     cleaning_level: int = 2,
     token_budget: int = 1_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
 ) -> str:
     """
     MCP tool: Scroll the page or bring an element into view, then return a snapshot.
@@ -657,7 +757,14 @@ async def mcp_browser_use__scroll(
           if your implementation supports it.
     """
     result = await MBU.helpers.scroll(x=x, y=y)
-    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
 
 @mcp.tool()
 @tool_envelope
@@ -671,6 +778,8 @@ async def mcp_browser_use__send_keys(
     return_mode: str = "outline",
     cleaning_level: int = 2,
     token_budget: int = 1_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
 ) -> str:
     """
     MCP tool: Send key strokes to an element and return a ContextPack snapshot.
@@ -709,7 +818,14 @@ async def mcp_browser_use__send_keys(
         selector_type=selector_type,
         timeout=timeout,
     )
-    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
 
 @mcp.tool()
 @tool_envelope
@@ -725,6 +841,8 @@ async def mcp_browser_use__wait_for_element(
     return_mode: str = "outline",
     cleaning_level: int = 2,
     token_budget: int = 1_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
 ) -> str:
     """
     MCP tool: Wait for an element to appear (and optionally be visible) and return a snapshot.
@@ -761,117 +879,16 @@ async def mcp_browser_use__wait_for_element(
         iframe_selector=iframe_selector,
         iframe_selector_type=iframe_selector_type,
     )
-    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
-#endregion
-
-#region Tools -- Cookie management
-@mcp.tool()
-@tool_envelope
-@exclusive_browser_access
-@ensure_driver_ready
-async def mcp_browser_use__get_cookies(
-    return_mode: str = "outline",
-    cleaning_level: int = 2,
-    token_budget: int = 1,
-) -> str:
-    """
-    MCP tool: Get all cookies for the current page and return a ContextPack.
-
-    The cookies list is included in the ContextPack's auxiliary section (e.g., `mixed.cookies`).
-    The snapshot represents the current page (as per `return_mode`).
-
-    Args:
-        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
-        cleaning_level: Structural/content cleaning intensity (0–3).
-        token_budget: Optional approximate token cap for the returned snapshot.
-
-    Returns:
-        str: JSON-serialized ContextPack with cookies included in `mixed`.
-
-    Raises:
-        RuntimeError: If the browser/driver is not ready.
-        ValueError: If `return_mode` is invalid.
-    """
-    result = await MBU.helpers.get_cookies()
-    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
-
-@mcp.tool()
-@tool_envelope
-@exclusive_browser_access
-@ensure_driver_ready
-async def mcp_browser_use__add_cookie(
-    name: str,
-    value: str,
-    domain: Optional[str] = None,
-    path: str = "/",
-    secure: bool = False,
-    http_only: bool = False,
-    expiry: Optional[int] = None,
-    return_mode: str = "outline",
-    cleaning_level: int = 2,
-    token_budget: int = 200,
-) -> str:
-    """
-    MCP tool: Add a cookie to the current page context and return a ContextPack.
-
-    Args:
-        name: Cookie name.
-        value: Cookie value.
-        domain: Optional domain (defaults to current page domain if omitted).
-        path: Cookie path (default "/").
-        secure: Mark cookie as Secure.
-        http_only: Mark cookie as HttpOnly.
-        same_site: SameSite policy, e.g. {"Lax", "Strict", "None"}.
-        expires: Unix epoch seconds for expiration (or None for session cookie).
-        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
-        cleaning_level: Structural/content cleaning intensity (0–3).
-        token_budget: Approximate token cap for the returned snapshot.
-
-    Returns:
-        str: JSON-serialized ContextPack including an acknowledgement and updated cookie info
-        in `mixed` (e.g., `mixed.cookie_added`, `mixed.cookies`).
-
-    Raises:
-        ValueError: If parameters are invalid (e.g., unsupported SameSite).
-        RuntimeError: If the browser/driver is not ready or operation fails.
-    """
-    result = await MBU.helpers.add_cookie(
-        name=name, value=value, domain=domain, path=path, secure=secure, http_only=http_only, expiry=expiry
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
     )
-    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
-
-@mcp.tool()
-@tool_envelope
-@exclusive_browser_access
-@ensure_driver_ready
-async def mcp_browser_use__delete_cookie(
-    name: str,
-    return_mode: str = "outline",
-    cleaning_level: int = 2,
-    token_budget: int = 200,
-) -> str:
-    """
-    MCP tool: Delete a cookie by name (and optional domain/path) and return a ContextPack.
-
-    Args:
-        name: Cookie name to remove.
-        domain: Optional domain filter if multiple cookies share the same name.
-        path: Path to target (default "/").
-        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
-        cleaning_level: Structural/content cleaning intensity (0–3).
-        token_budget: Approximate token cap for the returned snapshot.
-
-    Returns:
-        str: JSON-serialized ContextPack including an acknowledgement in `mixed`
-        (e.g., `mixed.cookie_deleted`) and a snapshot of the current page.
-
-    Raises:
-        RuntimeError: If the browser/driver is not ready or operation fails.
-        ValueError: If `return_mode` is invalid.
-    """
-    result = await MBU.helpers.delete_cookie(name=name)
-    return await _to_context_pack(result, return_mode, cleaning_level, token_budget)
 #endregion
+
 
 if __name__ == "__main__":
     mcp.run()

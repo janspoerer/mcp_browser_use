@@ -1,47 +1,3 @@
-"""
-## How Multiple Agents are Handled
-
-We do not manage multiple sessions in one MCP connection. 
-
-Each agent will have their own MCP connection.
-
-While each agent will connect to this very same mcp_browser_use code, 
-they will still connect independently. They can start and stop their MCP server
-connections at will without affecting the functioning of the browser. The 
-agents are agnostic to whether other agents are currently running.
-The MCP for browser use that we develop here should abstract the browser
-handling away from the agents.
-
-When a second agent opens a browser, the agent gets its own browser window. 
-IT MUST NOT USE THE SAME BROWSER WINDOW! The second agent WILL NOT open another 
-browser session.
-
-## Known Limitation: Iframe Context
-
-Multi-step interactions within iframes require specifying iframe_selector for each action.
-Browser context resets after each tool call for reliability. This is intentional design
-to prevent context state bugs. DO NOT attempt to "fix" by persisting iframe context.
-
-## Performance Considerations
-
-We do not mind additional overhead from validations. The most important thing is that the code is robust.
-
-## Tip for Debugging
-
-Do you find any obvious errors in the code? Please do rubber duck 
-debugging. Imagine you are the first agent that establishes a 
-connection. You connect and want to navigate. You call the function 
-to go to a website, but probably receive an error, because you have
-to open the browser first. Or do you not receive and error and the
-MCP server automatically opens a browser? That would also be fine.
-Then you open the browse, if not open yet. Then you click 
-around a bit. Then another agent 
-establishes a separate MCP server connection and does the same. 
-Then the first agent is done with his work and closes the connection. 
-The second continues working. In this rubber duck 
-journey, is there anything that does not work well?
-"""
-
 #region Imports
 import os
 import sys
@@ -825,61 +781,6 @@ def _ensure_driver_and_window() -> None:
         return
     _ensure_singleton_window(DRIVER)
 
-def _ensure_main_window(driver):
-    """
-    Ensures there is at least one page window, selects it, and returns (target_id, window_handle).
-    Raises RuntimeError if it cannot create/select a window.
-    """
-    # Try existing pages
-    infos = driver.execute_cdp_cmd("Target.getTargets", {}) or {}
-    pages = [t for t in infos.get("targetInfos", []) if t.get("type") == "page"]
-    for t in pages:
-        handle = _handle_for_target(driver, t.get("targetId"))
-        if handle:
-            driver.switch_to.window(handle)
-            return t.get("targetId"), handle
-
-    # Create a new window
-    created = driver.execute_cdp_cmd("Target.createTarget", {"url": "about:blank", "newWindow": True})
-    tid = created.get("targetId")
-    if not tid:
-        raise RuntimeError("Failed to create a new page target")
-
-    # Wait briefly for Selenium to surface the handle
-    for _ in range(50):  # ~5s
-        handle = _handle_for_target(driver, tid)
-        if handle:
-            driver.switch_to.window(handle)
-            return tid, handle
-        time.sleep(0.1)
-
-    raise RuntimeError("Created a target but could not obtain a window handle")
-
-
-def _ensure_session_window(driver, session):
-    tid = session.get("target_id")
-    if tid:
-        h = _handle_for_target(driver, tid)
-        if h:
-            driver.switch_to.window(h)
-            return
-
-    # Create a real OS window with its own target
-    try:
-        win = driver.execute_cdp_cmd("Browser.createWindow", {"state": "normal"})
-        session["window_id"] = win["windowId"]
-        session["target_id"] = win["targetId"]
-    except Exception:
-        # Fallback to a new window via Target API
-        t = driver.execute_cdp_cmd("Target.createTarget", {"url": "about:blank", "newWindow": True})
-        session["target_id"] = t["targetId"]
-        # You can get window_id after the fact:
-        w = driver.execute_cdp_cmd("Browser.getWindowForTarget", {"targetId": session["target_id"]})
-        session["window_id"] = w["windowId"]
-
-    h = _handle_for_target(driver, session["target_id"])
-    if h:
-        driver.switch_to.window(h)
 
 def _close_extra_blank_windows_safe(driver, exclude_handles=None) -> int:
     exclude = set(exclude_handles or ())
@@ -1098,7 +999,6 @@ def _make_page_snapshot(
 #endregion
 
 #region Tool helpers (clickable wait using a lambda on the element)
-
 def _same_dir(a: str, b: str) -> bool:
     if not a or not b:
         return False
@@ -2668,116 +2568,6 @@ async def wait_for_element(
         except Exception:
             pass
 
-async def get_cookies() -> str:
-    """
-    Get all cookies for the current page/domain.
-
-    Returns:
-        JSON string with ok status and list of cookies
-    """
-    try:
-        if DRIVER is None:
-            return json.dumps({"ok": False, "error": "driver_not_initialized"})
-
-        cookies = DRIVER.get_cookies()
-        snapshot = _make_page_snapshot()
-
-        return json.dumps({
-            "ok": True,
-            "action": "get_cookies",
-            "cookies": cookies,
-            "count": len(cookies),
-            "snapshot": snapshot,
-        })
-    except Exception as e:
-        diag = collect_diagnostics(DRIVER, e, get_env_config())
-        snapshot = _make_page_snapshot()
-        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
-
-async def add_cookie(
-    name: str,
-    value: str,
-    domain: Optional[str] = None,
-    path: str = "/",
-    secure: bool = False,
-    http_only: bool = False,
-    expiry: Optional[int] = None,
-) -> str:
-    """
-    Add a cookie to the browser.
-
-    Args:
-        name: Cookie name
-        value: Cookie value
-        domain: Optional domain for the cookie (defaults to current domain)
-        path: Cookie path (default: "/")
-        secure: Whether cookie should only be sent over HTTPS
-        http_only: Whether cookie should be HTTP-only
-        expiry: Optional expiry timestamp (Unix epoch seconds)
-
-    Returns:
-        JSON string with ok status and confirmation message
-    """
-    try:
-        if DRIVER is None:
-            return json.dumps({"ok": False, "error": "driver_not_initialized"})
-
-        cookie_dict = {
-            "name": name,
-            "value": value,
-            "path": path,
-            "secure": secure,
-            "httpOnly": http_only,
-        }
-
-        if domain:
-            cookie_dict["domain"] = domain
-        if expiry:
-            cookie_dict["expiry"] = int(expiry)
-
-        DRIVER.add_cookie(cookie_dict)
-        snapshot = _make_page_snapshot()
-
-        return json.dumps({
-            "ok": True,
-            "action": "add_cookie",
-            "cookie": {"name": name, "value": value},
-            "snapshot": snapshot,
-            "message": f"Cookie '{name}' added successfully"
-        })
-    except Exception as e:
-        diag = collect_diagnostics(DRIVER, e, get_env_config())
-        snapshot = _make_page_snapshot()
-        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
-
-async def delete_cookie(name: str) -> str:
-    """
-    Delete a specific cookie by name.
-
-    Args:
-        name: Name of the cookie to delete
-
-    Returns:
-        JSON string with ok status and confirmation message
-    """
-    try:
-        if DRIVER is None:
-            return json.dumps({"ok": False, "error": "driver_not_initialized"})
-
-        DRIVER.delete_cookie(name)
-        snapshot = _make_page_snapshot()
-
-        return json.dumps({
-            "ok": True,
-            "action": "delete_cookie",
-            "cookie_name": name,
-            "snapshot": snapshot,
-            "message": f"Cookie '{name}' deleted successfully"
-        })
-    except Exception as e:
-        diag = collect_diagnostics(DRIVER, e, get_env_config())
-        snapshot = _make_page_snapshot()
-        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 #endregion
 
 

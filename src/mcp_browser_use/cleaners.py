@@ -1,7 +1,7 @@
 # mcp_browser_use/cleaners.py
 
 import re
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional, Sequence, Pattern, Union
 
 NOISE_ID_CLASS_PAT = re.compile(
     r"(gtm|gtag|analytics|ad[s-]?|adslot|sponsor|cookie[-_ ]?banner|chat[-_ ]?widget)",
@@ -15,12 +15,71 @@ def approx_token_count(text: str) -> int:
     return max(0, (len(text) // 4))
 
 
+# CDN detection and cleanup helpers
+CDN_HOST_PATS = [
+    re.compile(r"(?:^|\.)cdn(?:[\.-]|$)", re.I),  # matches cdn.*, *.cdn-foo.*, *.cdn.foo.*
+    re.compile(r"/cdn/", re.I),                  # handles relative /cdn/... paths
+]
+
+def _build_cdn_pats(extra: Optional[Sequence[Union[str, Pattern[str]]]]) -> list[Pattern[str]]:
+    pats: list[Pattern[str]] = list(CDN_HOST_PATS)
+    for p in extra or []:
+        if isinstance(p, str):
+            pats.append(re.compile(p, re.I))
+        elif hasattr(p, "search"):
+            pats.append(p)  # already a compiled regex
+    return pats
+
+def _is_cdn_url(url: str, extra_pats=None) -> bool:
+    if not isinstance(url, str) or not url.strip():
+        return False
+    s = url.strip().strip('\'"')
+    # extract from url(...) if style
+    s = re.sub(r"^url\((.+?)\)$", r"\1", s).strip('\'"')
+    # srcset often has descriptors like "800w" – take only the URL portion
+    s = s.split()[0] if s else s
+
+    # support scheme-less //cdn.host
+    host, path = "", ""
+    try:
+        if s.startswith("//"):
+            host = s[2:].split("/", 1)[0].lower()
+            path = "/" + s[2:].split("/", 1)[1] if "/" in s[2:] else ""
+        else:
+            from urllib.parse import urlparse
+            p = urlparse(s)
+            host = (p.netloc or "").lower()
+            path = p.path or ""
+    except Exception:
+        pass
+
+    pats = (extra_pats or []) + CDN_HOST_PATS
+    haystacks = [host, path, s]
+    return any(p.search(h) for h in haystacks for p in pats)
+
+def _filter_srcset(srcset_val: str, extra_pats=None) -> str | None:
+    # Return a cleaned srcset string without CDN candidates, or None if all are removed
+    if not srcset_val:
+        return None
+    pieces = [i.strip() for i in str(srcset_val).split(",") if i.strip()]
+    kept = []
+    for piece in pieces:
+        url = piece.split()[0].strip('\'"')
+        if not _is_cdn_url(url, extra_pats):
+            kept.append(piece)
+    if not kept:
+        return None
+    return ", ".join(kept)
+
 def basic_prune(
     html: str,
     level: int,
     prune_hidden: bool = True,
     prune_classes_except_buttons: bool = True,
     prune_linebreaks: bool = True,
+    remove_cdn_links: bool = True,
+    cdn_host_patterns: list[str] | None = None,
+    drop_cdn_elements: bool = False,  # if True, remove entire asset tags
 ) -> Tuple[str, Dict[str, int]]:
     """
     Perform structural pruning on raw HTML to remove non-content noise.
@@ -45,6 +104,7 @@ def basic_prune(
         "class_drops": 0,
         "whitespace_trim": 0,
         "comments_removed": 0,
+        "cdn_links_removed": 0,
     }
 
     import bs4
@@ -153,6 +213,77 @@ def basic_prune(
                 dropdown_menu.decompose()
                 dropdown_removed += 1
         pruned_counts["noise"] += dropdown_removed
+
+
+    # 2.5) Strip CDN links across attributes and inline styles
+    if remove_cdn_links:
+        cdn_removed = 0
+        # Common URL-carrying attributes to inspect
+        url_attrs = ("src", "href", "poster", "data-src", "data-lazy", "data-original", "data-lazy-src", "data-srcset")
+        asset_tags = {"img", "script", "link", "source", "video", "audio", "track"}
+
+        for el in list(soup.find_all(True)):
+            # Clean srcset by filtering out CDN candidates
+            if el.has_attr("srcset"):
+                cleaned = _filter_srcset(str(el.get("srcset")), cdn_host_patterns)
+                original = str(el.get("srcset"))
+                if cleaned != original:
+                    if cleaned:
+                        el["srcset"] = cleaned
+                    else:
+                        try:
+                            del el.attrs["srcset"]
+                        except Exception:
+                            pass
+                    cdn_removed += 1
+
+            # Remove CDN URLs from URL attributes
+            for attr in url_attrs:
+                if not el.has_attr(attr):
+                    continue
+                val = str(el.get(attr, ""))
+                if _is_cdn_url(val, cdn_host_patterns):
+                    if drop_cdn_elements and el.name in asset_tags:
+                        el.decompose()
+                        cdn_removed += 1
+                        break  # element is gone
+                    else:
+                        try:
+                            del el.attrs[attr]
+                        except Exception:
+                            pass
+                        cdn_removed += 1
+
+            # Strip any inline style url(...) pointing to CDNs
+            if el.has_attr("style"):
+                style_val = str(el["style"])
+                # Remove only url(...) tokens that are CDN; keep the rest of the style intact
+                def repl(m):
+                    raw = m.group(1).strip('\'"')
+                    return "" if _is_cdn_url(raw, cdn_host_patterns) else m.group(0)
+
+                new_style = re.sub(r"url\((.+?)\)", repl, style_val)
+                if new_style != style_val:
+                    # Clean leftover artifacts like empty declarations
+                    new_style = re.sub(r"\s*;\s*;\s*", ";", new_style).strip(" ;")
+                    if new_style:
+                        el["style"] = new_style
+                    else:
+                        try:
+                            del el.attrs["style"]
+                        except Exception:
+                            pass
+                    cdn_removed += 1
+
+        pruned_counts["cdn_links_removed"] += cdn_removed
+
+
+    # Optional: remove plaintext CDN URLs from text nodes
+    for t in soup.find_all(string=True):
+        new_t = re.sub(r"https?://[^ \t\n\r,]*cdn[^ \t\n\r,]*", "", str(t), flags=re.I)
+        if new_t != str(t):
+            t.replace_with(new_t)
+            pruned_counts["cdn_links_removed"] += 1
 
     # 3) Attribute pruning
     if level >= 2:
@@ -287,3 +418,4 @@ def extract_outline(html: str, max_items: int = 64):
             if len(outline) >= max_items:
                 return outline
     return outline
+

@@ -100,7 +100,6 @@ class ChromeCustomProfileLoader:
                 # print("Also check for Chrome internal log files (e.g., chrome_debug.log in the custom data dir or temp).") # Keep commented
                 raise # Re-raise the exception
 
-
 """
 
 

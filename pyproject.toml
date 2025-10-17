@@ -15,13 +15,17 @@ dependencies = [
   "PySocks>=1.7.1",
   "python-dotenv",
   "selenium>=4.30.0",
+  "psutil",
+  "beautifulsoup4",
+  "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
 test = [
     "pytest", # We DO NOT want to use pytest-asyncio.
+    "pytest-cov",
     "unittest-xml-reporting",
-    "fast-agent-mcp"
+    "fast-agent-mcp",
 ]
 
 [tool.setuptools]

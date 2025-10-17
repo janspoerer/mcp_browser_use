@@ -14,9 +14,28 @@
 
 This project aims to empower AI agents to perform web use, browser automation, scraping, and automation with Model Context Protocol (MCP) and Selenium.
 
+The special feature of this MCP is that it can handle multiple agents accessing multiple browser **windows**. One does not need to start multiple Docker images, VMs, or computers to have multiple scraping agents. And one can still use **one single browser profile** across all agents. Each agent will have its own windows, and they will not interfere with each other.
+
+_This makes the handling of multiple agents seamless: Just start as many agents as you want, and it will just work!_ Use two Claude Code instances, one Codex CLI instance, one Gemini CLI instance and a `fast-agent` instance -- all on one computer, all using the same browser profile, and all working (somewhat) in parallel.
+
 > Our mission is to let AI agents complete any web task with minimal human supervision -- all based on natural language instructions.
 
-## How to Use This MCP
+## Feature Highlights
+
+* **HTML Truncation:** The MCP allows you to configure truncation of the HTML pages. Other scraping MCPs may overwhelm the AI with accessibility snapshots or HTML dumps that are larger than the context window. This MCP will help you to manage the maximum page size by setting the `MCP_MAX_SNAPSHOT_CHARS` environment variable.
+* **Multiple Browser Windows and Multiple Agents:** You can connect multiple agents to this MCP independently, without requiring coordination on behalf of the agents. Each agent can work with **the same** browser profile, which is helpful when logins should persist across agents. Each agent gets their own browser window, so they do not interfere with each other. Uses Chrome DevTools Protocol TargetId to identify browser windows.
+
+## Known Limitations
+
+* **Iframe Context:** Multi-step interactions within iframes require specifying `iframe_selector` for each action. Browser context resets after each tool call for reliability. For iframe workflows, repeat the iframe selector parameter in each `click_element`, `fill_text`, or `debug_element` call.
+
+## Configuration / Installation
+
+* We recommend using Chrome Canary or Chrome Beta. This will ensure that your AI agents will not interfere with your Chrome instance. While this MCP can handle an arbitrary number of agents to use a single Chrome executable, the MCP does require the instance to be started in developer mode. If you, as a normal human user, start your normal Chrome instance manually, the Chrome instance **won't be in developer mode**. This is a problem. Thus, allow you to use your Chrome browser normally, please just install Chrome Beta (recommended) or Chrome Canary (not recommended due to instability).
+* After installing Chrome Beta, point to the Chrome Beta executable in the `.env` file as described below.
+* Start the MCP server (if you do not know how to do this, check the section "How to Use (This) MCP below).
+
+## How to Use (This) MCP
 
 Please refer to the [MCP documentation on modelcontextprotocol.io](https://modelcontextprotocol.io/quickstart/user).
 
@@ -49,58 +68,102 @@ Restart Claude to see if the JSON config is valid. Claude will lead to you the e
 
 If the setup was successful, you will see a small hammer icon in the bottom-right of the "New Chat" window in Claude. Next to the hammer will be the number of functions that the MCP provides.
 
-Click to hammer to see something like this:
+Click the hammer to see the available tools.
+
+## `.env` Variables
 
 ```
-Available MCP Tools
-
-Claude can use tools provided by specialized servers using Model Context Protocol. Learn more about MCP.
-
-click_element
-Click an element on the page. Args: session_id: Session ID of the browser selector: CSS selector, XPath, or ID of the element to click selector_type: Type of selector (css, xpath, id)
-
-From server: mcp_browser_use
-
-close_browser
-Close a browser session. Args: session_id: Session ID of the browser to close
-
-From server: mcp_browser_use
-
-fill_text
-Input text into an element. Args: session_id: Session ID of the browser selector: CSS selector, XPath, or ID of the input field text: Text to enter into the field selector_type: Type of selector (css, xpath, id) clear_first: Whether to clear the field before entering text
-
-From server: mcp_browser_use
-
-navigate
-Navigate to a URL. Args: session_id: Session ID of the browser url: URL to navigate to
-
-From server: mcp_browser_use
-
-scroll
-Scroll the page. Args: session_id: Session ID of the browser x: Horizontal scroll amount in pixels y: Vertical scroll amount in pixels
-
-From server: mcp_browser_use
-
-send_keys
-Send keyboard keys to the browser. Args: session_id: Session ID of the browser key: Key to send (e.g., ENTER, TAB, etc.) selector: CSS selector, XPath, or ID of the element to send keys to (optional) selector_type: Type of selector (css, xpath, id)
-
-From server: mcp_browser_use
-
-start_browser
-Start a new browser session. Args: headless: Whether to run the browser in headless mode
-
-From server: mcp_browser_use
-
-take_screenshot
-Take a screenshot of the current page. Args: session_id: Session ID of the browser
-
-From server: mcp_browser_use
+CHROME_PROFILE_NAME=Selenium
+CHROME_EXECUTABLE_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+CHROME_PROFILE_USER_DATA_DIR=/Users/janspoerer/Library/Application Support/Google/Chrome
+CHROME_PROFILE_NAME=Profile 15
+MCP_MAX_SNAPSHOT_CHARS=10000
 ```
 
+## Available Tools
+
+
+## Debugging
+
+Check if the browser is running by visiting this URL in your main browser (not the automated browser):
+
+```
+http://127.0.0.1:9223/json/version
+```
+
+It will display something like this if the browser is running:
+
+```
+{
+   "Browser": "Chrome/140.0.7339.24",
+   "Protocol-Version": "1.3",
+   "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+   "V8-Version": "14.0.365.3",
+   "WebKit-Version": "537.36 (@f8765868e23d9ee5209061fc999f6495c525cd13)",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9223/devtools/browser/d8f511eb-947c-4eb1-833d-917212a92394"
+}
+```
+
+## Lock Files and Coordination
+
+This MCP uses file-based locking to coordinate multiple agents accessing the same browser profile. All lock files are stored in `tmp/mcp_locks/` in the project root directory for easy inspection.
+
+### Lock File Types
+
+**Action Lock (`<hash>.softlock.json` and `<hash>.softlock.mutex`)**
+- Ensures only one agent can perform browser actions at a time
+- Default TTL: 30 seconds (configurable via `MCP_ACTION_LOCK_TTL`)
+- Automatically renewed with heartbeat while agent is working
+- Agents wait up to 60 seconds to acquire lock (configurable via `MCP_ACTION_LOCK_WAIT`)
+
+**Window Registry (`<hash>.window_registry.json`)**
+- Tracks which agent owns which browser window
+- Contains: targetId, windowId, process PID, last heartbeat timestamp
+- Used for orphan cleanup: automatically closes windows from crashed/stale agents
+- Stale threshold: 5 minutes (configurable via `MCP_WINDOW_REGISTRY_STALE_SECS`)
+
+**Startup Mutex (`<hash>.startup.mutex`)**
+- Ensures single browser instance startup per profile
+- Used during initial Chrome process launch coordination
+
+**File Format:** The `<hash>` is a SHA-256 hash derived from your Chrome profile's `user_data_dir` and `profile_name`, ensuring stable identification across processes.
+
+### Configuration
+
+You can customize lock behavior with these environment variables:
+
+```bash
+# Lock directory (default: <project_root>/tmp/mcp_locks/)
+MCP_BROWSER_LOCK_DIR=/path/to/locks
+
+# Action lock TTL in seconds (default: 30)
+MCP_ACTION_LOCK_TTL=30
+
+# Max wait time for action lock in seconds (default: 60)
+MCP_ACTION_LOCK_WAIT=60
+
+# Window registry stale threshold in seconds (default: 300)
+MCP_WINDOW_REGISTRY_STALE_SECS=300
+
+# File mutex stale threshold in seconds (default: 60)
+MCP_FILE_MUTEX_STALE_SECS=60
+```
+
+### Orphan Window Cleanup
+
+When an agent starts a browser session, it automatically:
+1. Checks the window registry for entries from dead processes (PID no longer exists)
+2. Checks for stale entries (no heartbeat for >5 minutes)
+3. Closes orphaned windows via Chrome DevTools Protocol
+4. Cleans up registry entries
+
+This ensures crashed or terminated agents don't leave zombie browser windows open.
 
 ## Demo Video (YouTube)
 
 [![Quick demo](https://img.youtube.com/vi/20B8trurlsI/hqdefault.jpg)](https://www.youtube.com/watch?v=20B8trurlsI)
+
+
 
 ## Run Tests
 

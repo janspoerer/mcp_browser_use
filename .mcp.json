@@ -1,0 +1,13 @@
+{
+    "mcpServers": {
+        "mcp_browser_use": {
+            "type": "stdio",
+            "command": "/Users/janspoerer/code/agents/mcp_browser_use/.venv/bin/python",
+            "args": [
+                "-m",
+                "mcp_browser_use"
+            ],
+            "env": {}
+        }
+    }
+}

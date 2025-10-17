@@ -1,8 +1,26 @@
 summarizer.ipynb
+
+
 fastagent.secrets.yaml
 summary_with_header.txt
+summary_with_headers.txt
 summary.txt
-
+trying_stuff_out_v2.py
+_OLD/
+*.ipynb
+.codex/
+.claude/
+.gemini/
+*.jsonl
+main.tex
+*.fls
+*.out
+*.pdf
+*.toc
+*.fdb_*
+*.aux
+*.gz
+*.tex
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -178,3 +196,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# MCP browser lock files and temporary data
+tmp/

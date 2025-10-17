@@ -1,814 +1,918 @@
-import os
-import sys
-import time
-import uuid
+#region Overview
+"""
+## Known Limitation: Iframe Context
+
+Multi-step iframe interactions require specifying iframe_selector for each action.
+This is intentional design to prevent context state bugs.
+
+## Price, Stock Quantity, and Delivery Times
+
+If you cannot see detailed prices, stock quanities, and delivery times and you suspect that data might be available behind a login, please ask Jan on Slack for help. He can probably log you in.
+
+## Performance Considerations
+
+We do not mind additional overhead from validations. The most important thing is that the code is robust.
+
+## Tip for Debugging
+
+Do you find any obvious errors in the code? Please do rubber duck 
+debugging. Imagine you are the first agent that establishes a 
+connection. You connect and want to navigate. You call the function 
+to go to a website, but probably receive an error, because you have
+to open the browser first. Or do you not receive and error and the
+MCP server automatically opens a browser? That would also be fine.
+Then you open the browse, if not open yet. Then you click 
+around a bit. Then another agent 
+establishes a separate MCP server connection and does the same. 
+Then the first agent is done with his work and closes the connection. 
+The second continues working. In this rubber duck 
+journey, is there anything that does not work well?
+
+The MCP should allow multiple browser windows to be opened. Each AI agent can call the "start_browser" tool. If the browser is not open at all, it is opened, using the specified persistent user profile. If a browser is already open, so if the second agent calls "start_browser", a new window is opened. Each agent only uses their own window. The windows are identified by tags.
+
+When an agent performs an action, the browser should be briefly locked until 10 seconds are over or until the agent unlocks the browser. This can be done with a lock file.
+
+The MCP returns a cleaned HTML version of the page after each action, so the agent can see what changed and what it can do to further interact with the page or find information from the page.
+
+## How Multiple Agents are Handled
+
+We do not manage multiple sessions in one MCP connection. 
+
+While each agent will connect to this very same mcp_browser_use code, 
+they will still connect independently. They can start and stop their MCP server
+connections at will without affecting the functioning of the browser. The 
+agents are agnostic to whether other agents are currently running.
+The MCP for browser use that we develop here should abstract the browser
+handling away from the agents.
+
+When a second agent opens a browser, the agent gets its own browser window. IT MUST NOT USE THE SAME BROWSER WINDOW! The second agent WILL NOT open another browser session.
+
+## Feature Highlights
+
+* **Content Pagination:** The MCP supports paginating through large HTML pages using `html_offset` (for HTML mode) and `text_offset` (for TEXT mode). When pages exceed token limits, agents can make multiple calls with increasing offsets to retrieve all content. The offset is applied to cleaned content (after removing scripts/styles/ads), enabling efficient pagination through content-rich pages. Check the `hard_capped` flag in responses to detect truncation.
+
+* **HTML Truncation & Token Management:** The MCP allows you to configure truncation of HTML pages via `token_budget` parameter on all tools. Other scraping MCPs may overwhelm the AI with accessibility snapshots or HTML dumps that are larger than the context window. This MCP provides precise control over snapshot size through configurable token budgets and cleaning levels.
+
+* **Multiple Browser Windows and Multiple Agents:** You can connect multiple agents to this MCP independently, without requiring coordination on behalf of the agents. Each agent can work with **the same** browser profile, which is helpful when logins should persist across agents. Each agent gets their own browser window, so they do not interfere with each other.
+
+* **Flexible Snapshot Modes:** Every tool returns configurable snapshots in multiple formats: `outline` (headings), `text` (extracted text), `html` (cleaned HTML), `dompaths` (element paths), or `mixed` (combination). Choose the representation that best fits your use case.
+
+
+"""
+#endregion
+
+#region Required Tools
+"""
+```
+start_browser
+```
+> Starts a browser if no browser session is open yet for the given user profile.
+Opens a new window if an existing browser session is already there.
+Multiple agents can share one browser profile (user directory) by each opening a different browser.
+This has no impact on the individual agents. For them, they just open a browser
+and they do not need to know if other agents are also working
+alongside them. The browser handling is abstracted away by the MCP.
+
+```
+navigate
+```
+>     Navigates the browser to a specified URL.
+>
+>    Args:
+>        url (str): The URL to navigate to.
+>
+>    Returns:
+>        str: A message indicating successful navigation, along with the page title and HTML.
+
+```
+click_element
+```
+>     Clicks an element on the web page, with iframe and shadow root support.
+>     
+>     Note: For multi-step iframe interactions, specify iframe_selector in each call.
+>     Browser context resets after each action for reliability.
+>
+>     Args:
+>        selector (str): The selector for the element to click.
+>        selector_type (str, optional): The type of selector. Defaults to 'css'.
+>        timeout (int, optional): Maximum wait time for the element to be clickable. Defaults to 10.
+>        force_js (bool, optional): If True, uses JavaScript to click the element. Defaults to False.
+>        iframe_selector (str, optional): Selector for the iframe. Defaults to None.
+>        iframe_selector_type (str, optional): Selector type for the iframe. Defaults to 'css'.
+>        shadow_root_selector (str, optional): Selector for the shadow root. Defaults to None.
+>        shadow_root_selector_type (str, optional): Selector type for the shadow root. Defaults to 'css'.
+>
+>    Returns:
+>        str: A message indicating successful click, along with the current URL and page title.
+
+```
+fill_text
+```
+> Input text into an element.
+>
+> Note: For multi-step iframe interactions, specify iframe_selector in each call.
+> Browser context resets after each action for reliability.
+>
+>     Args:
+>         selector: CSS selector, XPath, or ID of the input field
+>         text: Text to enter into the field
+>         selector_type: Type of selector (css, xpath, id)
+>         clear_first: Whether to clear the field before entering text
+>         timeout: Maximum time to wait for the element in seconds
+>         iframe_selector: Selector for the iframe (if element is inside iframe)
+>         iframe_selector_type: Selector type for the iframe
+>         shadow_root_selector: Optional selector for shadow root containing the element
+>         shadow_root_selector_type: Selector type for the shadow root
+
+```
+send_keys
+```
+> Send keyboard keys to the browser.
+> 
+>     Args:
+>         key: Key to send (e.g., ENTER, TAB, etc.)
+>         selector: CSS selector, XPath, or ID of the element to send keys to (optional)
+>         selector_type: Type of selector (css, xpath, id)
+
+```
+scroll
+```
+> Scroll the page.
+> 
+>     Args:
+>         x: Horizontal scroll amount in pixels
+>         y: Vertical scroll amount in pixels
+
+```
+take_screenshot
+```
+> Take a screenshot of the current page.
+>
+>     Args:
+>         screenshot_path: Optional path to save the full screenshot
+>         return_base64: Whether to return base64 encoded thumbnail (default: False)
+>         return_snapshot: Whether to return page HTML snapshot (default: False)
+>         thumbnail_width: Optional width in pixels for thumbnail (default: 200px if return_base64=True)
+>                         Minimum: 50px. Only used when return_base64=True.
+>                         Note: 200px accounts for MCP protocol overhead to stay under 25K token limit.
+
+
+```
+close_browser
+```
+> Close a browser session.
+> 
+
+
+```
+wait_for_element
+```
+> Wait for an element to be present, visible, or clickable.
+> 
+>     Args:
+>         selector: CSS selector, XPath, or ID of the element
+>         selector_type: Type of selector (css, xpath, id)
+>         timeout: Maximum time to wait in seconds
+>         condition: What to wait for - 'present', 'visible', or 'clickable'
+
+
+```
+read_chromedriver_log
+```
+>     Fetch the first N lines of the Chromedriver log for debugging.
+>
+>    Args:
+>        lines (int): Number of lines to return from the top of the log.
+
+
+```
+get_debug_info
+```
+> Return user-data dir, profile name, full profile path, Chrome binary path,
+> browser/driver/Selenium versions -- everything we need for debugging.
+
+
+
+```
+debug_element
+```
+> Debug why an element might not be clickable or visible.
+> 
+> Note: For iframe elements, specify iframe_selector to debug within iframe context.
+> 
+>     Args:
+>         selector: CSS selector, XPath, or ID of the element
+>         selector_type: Type of selector (css, xpath, id)
+>         iframe_selector: Selector for the iframe (if element is inside iframe)
+>         iframe_selector_type: Selector type for the iframe
+
+```
+"""
+#endregion
+
+#region Imports
 import logging
-import traceback
-import tempfile
-import platform
-import subprocess
-import psutil
-import shutil
-import random
-from pathlib import Path
-
-import selenium
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.common.exceptions import (
-    WebDriverException,
-    ElementNotInteractableException,
-    TimeoutException,
-    StaleElementReferenceException,
-    SessionNotCreatedException,
-)
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-
+from typing import Optional
 from mcp.server.fastmcp import FastMCP
+#endregion 
 
-
-"""
-Maybe use this. But run in headed mode, not headless.
-
-class ChromeCustomProfileLoader:
-    '''Launch ChromeDriver against a custom profile location.'''
-
-    @staticmethod
-    def launch_with_custom_profile(
-        custom_data_dir: str, # The path to the custom user data directory
-        profile_folder: str = "Default", # The profile folder name within the custom dir
-        is_headless: bool = False,
-        is_force_custom_profile: bool = True
-    ) -> webdriver.Chrome:
-        print(f"Using custom user data directory: {custom_data_dir}")
-        print(f"Targeting profile folder: {profile_folder}")
-
-        options = webdriver.ChromeOptions()
-
-        options.add_argument(f"--user-data-dir={custom_data_dir}")
-        options.add_argument(f"--profile-directory={profile_folder}") # This should now load the copied Default profile
-        options.add_argument("--no-proxy-server")
-        options.add_argument("--no-sandbox") # options.add_argument("--disable-dev-shm-usage")
-
-        # Optional: Keep logging enabled for troubleshooting if needed
-        log_directory = os.path.join(os.path.expanduser("~"), "Documents")
-        log_file = os.path.join(log_directory, f"chromedriver_custom_{profile_folder}_log.txt")
-        service_args = ['--verbose', f'--log-path={log_file}'] # print(f"ChromeDriver service args: {service_args}") # Keep commented unless needed for debugging # print(f"Logging to: {log_file}") # Keep commented unless needed for debugging
-
-        # Optional: Enable Chrome internal verbose logging (might create chrome_debug.log)
-        options.add_argument("--verbose")
-
-
-        if is_headless:
-            options.add_argument("--headless=new")
-
-        print(f"Chrome Options being used: {options.arguments}")
-
-        try:
-            chrome_driver_path = ChromeDriverManager().install()
-            # print(f"Using ChromeDriver at: {chrome_driver_path}") # Keep commented unless needed
-
-            service = Service(executable_path=chrome_driver_path)#, service_args=service_args) # Keep service_args commented unless needed
-
-            print(f"Attempting to launch Chrome with custom profile at {custom_data_dir}...")
-            # Add a small delay before initiating the session - important for extensions
-            time.sleep(1)
-
-            driver = webdriver.Chrome(service=service, options=options)
-            print(f"Chrome launched successfully with custom profile!")
-            return driver
-        except Exception as e:
-            print(f"Failed to launch Chrome with custom profile: {e}")
-            if not is_force_custom_profile:
-                options = webdriver.ChromeOptions()
-
-                options.add_argument(f"--user-data-dir={custom_data_dir}")
-                options.add_argument(f"--profile-directory={profile_folder}") # This should now load the copied Default profile
-                options.add_argument("--no-proxy-server")
-                options.add_argument("--no-sandbox") # options.add_argument("--disable-dev-shm-usage")
-                options.add_argument("--headless=new")
-                driver = webdriver.Chrome(service=service, options=options)
-                return driver
-
-            else:
-                # print(f"Check the ChromeDriver log file at {log_file} for details.") # Keep commented unless needed
-                # print("Also check for Chrome internal log files (e.g., chrome_debug.log in the custom data dir or temp).") # Keep commented
-                raise # Re-raise the exception
-
-"""
-
-
-# --- Logging Configuration ---
-LOG_FILE = Path(os.getcwd()) / "selenium_mcp_log.log"
-if not LOG_FILE.exists():
-    LOG_FILE.touch()
-
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-    ],
-    force=True
+#region Import from your package __init__.py
+import mcp_browser_use as MBU
+from mcp_browser_use.decorators import (
+    tool_envelope,
+    exclusive_browser_access,
+    ensure_driver_ready,
 )
+#endregion
 
-log_filename = os.path.join(tempfile.gettempdir(), "mcp_browser_use.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(log_filename),
-        logging.StreamHandler(sys.stderr),
-    ],
-)
+#region Logger
 logger = logging.getLogger(__name__)
+logger.warning(f"mcp_browser_use from: {getattr(MBU, '__file__', '<namespace>')}")
+#endregion
 
-# Initialize FastMCP server
-mcp = FastMCP("selenium")
-
-# Store browser sessions
-browser_sessions = {}
-browser_temp_dirs = {}
-browser_log_paths = {}
+#region FastMCP Initialization
+mcp = FastMCP("mcp_browser_use")
+#endregion
 
 
-def remove_unwanted_tags(html_content):
-    """Remove specific tags (<script>, <style>, <meta>, <link>, <noscript>) from HTML."""
-    soup = BeautifulSoup(html_content, 'html.parser')
+#beginregion ContextPack
+from mcp_browser_use.helpers_context import pack_from_snapshot_dict
+import json as _json
 
-    # Remove specified tags
-    for tag in soup.find_all(['script', 'style', 'meta', 'link', 'noscript']):
-        tag.extract()
-
-    # Getting the text and stripping whitespace.
-    return ' '.join(str(soup).split())
-
-
-def get_cleaned_html(driver):
-    """Get cleaned HTML content without script tags."""
-    html_content = driver.page_source
-    # Remove script tags
-    cleaned_html = remove_unwanted_tags(html_content)
-    return cleaned_html
-
-
-def cleanup_old_temp_dirs():
-    """Clean up old temporary directories that might have been left behind."""
-    temp_root = tempfile.gettempdir()
-    current_time = time.time()
-    max_age = 24 * 3600  # 24 hours in seconds
-
-    for item in os.listdir(temp_root):
-        if item.startswith("selenium_profile_"):
-            item_path = os.path.join(temp_root, item)
-            try:
-                if os.path.isdir(item_path):
-                    stat = os.stat(item_path)
-                    if current_time - stat.st_mtime > max_age:
-                        shutil.rmtree(item_path, ignore_errors=True)
-                        logging.info(f"Cleaned up old temp directory: {item_path}")
-            except Exception as e:
-                logging.warning(f"Failed to check/clean temp dir {item_path}: {e}")
-
-
-def kill_chrome_processes():
-    """Kill any existing Chrome and ChromeDriver processes"""
-    for proc in psutil.process_iter(['name']):
-        try:
-            # Check for both Chrome and ChromeDriver processes
-            if proc.info['name'] in ['chrome', 'chromedriver', 'Google Chrome']:
-                proc.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
-    time.sleep(2)  # Give processes time to fully terminate
-
-
-def cleanup_chrome_tmp_files():
-    """Clean up Chrome temporary files and directories"""
-    tmp_dir = tempfile.gettempdir()
-    patterns = ['selenium_profile_*', 'chromedriver_*']
-
-    for pattern in patterns:
-        for item in Path(tmp_dir).glob(pattern):
-            try:
-                if item.is_file():
-                    item.unlink()
-                elif item.is_dir():
-                    shutil.rmtree(item, ignore_errors=True)
-            except Exception as e:
-                logging.warning(f"Failed to remove {item}: {e}")
-
-
-def get_by_selector(selector_type):
-    """Helper function to get the appropriate By selector"""
-    selectors = {
-        'css': By.CSS_SELECTOR,
-        'xpath': By.XPATH,
-        'id': By.ID,
-        'name': By.NAME,
-        'tag': By.TAG_NAME,
-        'class': By.CLASS_NAME,
-        'link_text': By.LINK_TEXT,
-        'partial_link_text': By.PARTIAL_LINK_TEXT
-    }
-    return selectors.get(selector_type.lower())
-
-
-def find_element(driver, selector, selector_type, timeout=10, visible_only=False, iframe_selector=None, iframe_selector_type="css", shadow_root_selector=None, shadow_root_selector_type="css"):
+async def _to_context_pack(result_json: str, return_mode: str, cleaning_level: int, token_budget=1000, text_offset: Optional[int] = None, html_offset: Optional[int] = None) -> str:
     """
-    Finds a web element using various selectors, handling iframes and shadow roots.
+    Convert a helper's raw JSON result into a JSON-serialized ContextPack envelope.
 
-    This helper function locates an element on a web page, optionally within an iframe or shadow root.
+    Parses a helper response (typically including a "snapshot" dict and auxiliary fields),
+    normalizes `return_mode`, fetches current page metadata, and produces a size-controlled,
+    structured ContextPack. Any non-snapshot fields from the helper are surfaced under
+    the ContextPack's auxiliary section (e.g., `mixed`). Helper-reported errors (e.g.,
+    ok=false) are surfaced in `errors`.
 
     Args:
-        driver (WebDriver): The Selenium WebDriver instance.
-        selector (str): The selector string (e.g., CSS selector, XPath).
-        selector_type (str): The type of selector ('css', 'xpath', 'id', etc.).
-        timeout (int, optional): Maximum time to wait for the element in seconds. Defaults to 10.
-        visible_only (bool, optional): If True, waits for the element to be visible. Defaults to False.
-        iframe_selector (str, optional): Selector for the iframe containing the element. Defaults to None.
-        iframe_selector_type (str, optional): Selector type for the iframe. Defaults to 'css'.
-        shadow_root_selector (str, optional): Selector for the shadow root containing the element. Defaults to None.
-        shadow_root_selector_type (str, optional): Selector type for the shadow root. Defaults to 'css'.
+        result_json: JSON string returned by a helper call (must parse to a dict).
+        return_mode: Desired snapshot representation {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
+        text_offset: Optional character offset for text mode pagination.
+        html_offset: Optional character offset for html mode pagination.
 
     Returns:
-        WebElement: The found WebElement.
+        str: JSON-serialized ContextPack.
 
     Raises:
-        TimeoutException: If the element is not found within the timeout.
-        ValueError: If an unsupported selector type is provided.
-        Exception: If any other error occurs during element finding.
+        TypeError: If `result_json` is not valid JSON or is not a dict after parsing.
+        ValueError: If `return_mode` is invalid (normalized internally to a default).
     """
     try:
-        original_driver = driver
-        if iframe_selector:
-            by_iframe = get_by_selector(iframe_selector_type)
-            iframe = WebDriverWait(driver, timeout).until(
-                EC.presence_of_element_located((by_iframe, iframe_selector))
-            )
-            driver = driver.switch_to.frame(iframe)
+        obj = _json.loads(result_json)
+    except Exception:
+        raise TypeError(f"helper returned non-JSON: {type(result_json)}")
 
-        if shadow_root_selector:
-            by_shadow_root = get_by_selector(shadow_root_selector_type)
-            shadow_host = WebDriverWait(driver, timeout).until(
-                EC.presence_of_element_located((by_shadow_root, shadow_root_selector))
-            )
-            shadow_root = shadow_host.shadow_root
-            driver = shadow_root
+    # Normalize/validate return_mode
+    mode = (return_mode or "outline").lower()
+    if mode not in {"html", "text", "outline", "dompaths", "mixed"}:
+        mode = "outline"
 
-        by_selector = get_by_selector(selector_type)
+    try:
+        meta = await MBU.helpers.get_current_page_meta()
+    except Exception:
+        meta = {"url": None, "title": None, "window_tag": None}
 
-        if not by_selector:
-            raise ValueError(f"Unsupported selector type: {selector_type}")
+    snap = obj.get("snapshot")
+    if not isinstance(snap, dict):
+        snap = {"url": meta.get("url"), "title": meta.get("title"), "html": ""}
 
-        wait = WebDriverWait(driver, timeout)
+    cp = pack_from_snapshot_dict(
+        snapshot=snap,
+        window_tag=meta.get("window_tag"),
+        return_mode=mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset,
+    )
 
-        if visible_only:
-            element = wait.until(EC.visibility_of_element_located((by_selector, selector)))
-        else:
-            element = wait.until(EC.presence_of_element_located((by_selector, selector)))
+    # Surface errors in a first-class place
+    if obj.get("ok") is False:
+        try:
+            cp.errors.append({
+                "type": obj.get("error") or "error",
+                "summary": obj.get("summary"),
+                "details": {k: v for k, v in obj.items() if k != "snapshot"},
+            })
+        except Exception:
+            pass
 
-        if iframe_selector or shadow_root_selector:
-            original_driver.switch_to.default_content()
+    leftovers = {k: v for k, v in obj.items() if k != "snapshot"}
+    cp.mixed = leftovers
 
-        return element
+    return _json.dumps(cp, default=lambda o: getattr(o, "__dict__", repr(o)), ensure_ascii=False)
+#endregion
 
-    except TimeoutException:
-        if iframe_selector:
-            original_driver.switch_to.default_content()
-        logger.error(traceback.format_exc())
-        raise
-    except Exception as e:
-        if iframe_selector:
-            original_driver.switch_to.default_content()
-        logger.error(traceback.format_exc())
-        raise e
-
-
+#region Tools -- Navigation
 @mcp.tool()
-async def start_browser(headless: bool = False, is_persistent_browser_session: bool = False) -> str:
+@tool_envelope
+@exclusive_browser_access
+async def mcp_browser_use__start_browser(
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
+) -> str:
     """
-    Start Chrome with WSL2-specific configurations and without user-data-dir
+    Start a browser session or open a new window in an existing session.
 
-    Args:
-        headless (bool): If True, the browser will run in headless mode
-        is_persistent_browser_session (bool): If True, uses persistent session (currently unused)
+    **Performance Recommendation**: Start with token_budget=1000 and cleaning_level=3
+    (aggressive cleaning) unless you need more content. This reduces token usage
+    significantly while preserving essential information.
 
     Returns:
-        str: Success message with session ID or error message
+        ContextPack JSON
     """
-    session_id = str(uuid.uuid4())
-    chrome_options = Options()
-
-    # Basic options without user-data-dir
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-popup-blocking")
-
-    # WSL2-specific options
-    chrome_options.add_argument("--disable-features=VizDisplayCompositor")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--no-zygote")
-    chrome_options.add_argument("--no-first-run")
-
-    # Use temporary preferences instead of user-data-dir
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
-    chrome_options.add_experimental_option("prefs", {
-        "profile.default_content_settings.popups": 0,
-        "download.default_directory": "/tmp",
-        "download.prompt_for_download": False
-    })
-
-    if headless:
-        chrome_options.add_argument("--headless=new")
-
-    # Create a unique log path
-    log_path = os.path.join(tempfile.gettempdir(), f"chromedriver_{session_id}.log")
-    service = ChromeService(log_path=log_path)
-    browser_log_paths[session_id] = log_path
-
-    try:
-        # Add a retry mechanism
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                driver = webdriver.Chrome(service=service, options=chrome_options)
-                browser_sessions[session_id] = driver
-                logger.info(f"Browser session created successfully. Session ID: {session_id}")
-                return f"Browser session created successfully. Session ID: {session_id}"
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    logging.warning(f"Attempt {attempt + 1} failed, retrying in 2 seconds...")
-                    time.sleep(2)
-                else:
-                    raise
-    except Exception as exc:
-        error_msg = (
-            f"=== CHROME LAUNCH ERROR ===\n"
-            f"Session ID: {session_id}\n"
-            f"OS: {platform.system()} {platform.release()}\n"
-            f"Python: {sys.version.split()[0]}\n"
-            f"Selenium: {selenium.__version__}\n"
-            f"Error Type: {type(exc).__name__}\n"
-            f"Error Msg: {str(exc)}\n"
-            f"Traceback:\n{traceback.format_exc()}"
-        )
-        logging.error(error_msg)
-        return error_msg
-
+    result = await MBU.helpers.start_browser()
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget
+    )
 
 @mcp.tool()
-async def get_browser_versions() -> str:
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__navigate_to_url(
+    url: str,
+    wait_for: str = "load",
+    timeout_sec: int = 30,
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
+) -> str:
     """
-    Return the installed Chrome and Chromedriver versions to verify compatibility.
-    """
-    try:
-        # Get Chrome version
-        chrome_version = (
-            subprocess.check_output(["google-chrome", "--version"], stderr=subprocess.STDOUT)
-            .decode()
-            .strip()
-        )
-    except Exception as e:
-        chrome_version = f"Error fetching Chrome version: {e}"
+    MCP tool: Navigate the current tab to the given URL and return a ContextPack snapshot.
 
-    try:
-        # Get Chromedriver version
-        driver = webdriver.Chrome()  # temporary driver just to query version
-        chromedriver_version = driver.capabilities.get("browserVersion") or "<unknown>"
-        driver.quit()
-    except Exception as e:
-        chromedriver_version = f"Error fetching Chromedriver version via Selenium: {e}"
+    Loads the specified URL in the active window/tab and waits for the main document
+    to be ready before capturing the snapshot.
 
-    return f"{chrome_version}\nChromedriver (Selenium): {chromedriver_version}"
-
-
-@mcp.tool()
-async def navigate(session_id: str, url: str) -> str:
-    """
-    Navigates the browser to a specified URL.
+    **Performance Recommendation**: Use token_budget=1000-2000 and cleaning_level=3
+    (aggressive) by default. Only increase token_budget or decrease cleaning_level
+    if you're missing critical information. Most pages work well with 1000 tokens
+    and aggressive cleaning, which removes ads, scripts, and non-content elements.
 
     Args:
-        session_id (str): The ID of the browser session.
-        url (str): The URL to navigate to.
+        url: Absolute URL to navigate to (e.g., "https://example.com").
+        wait_for: Wait condition - "load" (default) or "complete".
+        timeout_sec: Maximum time (seconds) to wait for navigation readiness.
+        return_mode: Controls the content type in the ContextPack snapshot. One of
+            {"outline", "text", "html", "dompaths", "mixed"}.
+            **Recommendation**: Use "outline" for navigation, "text" for content extraction.
+        cleaning_level: Structural/content cleaning intensity for snapshot rendering.
+            0 = none, 1 = light, 2 = default, 3 = aggressive.
+            **Recommendation**: Start with 3 (aggressive) to minimize tokens.
+        token_budget: Approximate token cap for the returned snapshot.
+            **Recommendation**: Start with 1000-2000, only increase if needed.
+        text_offset: Optional character offset to start text extraction (for pagination).
+            Only applies when return_mode="text".
+            Example: Use text_offset=10000 to skip the first 10,000 characters.
+        html_offset: Optional character offset to start HTML extraction (for pagination).
+            Only applies when return_mode="html".
+            Example: Use html_offset=50000 to skip the first 50,000 characters of cleaned HTML.
+            Note: Offset is applied AFTER cleaning_level processing but BEFORE token_budget truncation.
 
     Returns:
-        str: A message indicating successful navigation, along with the page title and HTML.
+        str: JSON-serialized ContextPack with post-navigation snapshot.
+
+    Raises:
+        TimeoutError: If the page fails to load within `timeout`.
+        ValueError: If `url` is invalid or `return_mode` is invalid.
+        RuntimeError: If the browser/driver is not ready.
+
+    Notes:
+        - The snapshot reflects the DOM after the initial load. If the site performs
+          heavy client-side hydration, consider waiting for a specific element with
+          `wait_for_element` before subsequent actions.
+        - **Pagination Strategy for Large Pages:**
+          When dealing with pages that exceed token limits, use offset parameters to paginate:
+
+          1. First call: Set return_mode="html", token_budget=50000, no offset
+             - Check response for `hard_capped=true` to detect truncation
+
+          2. Subsequent calls: Use html_offset to continue from where you left off
+             - Example: html_offset=200000 (50000 tokens * 4 chars/token)
+             - Continue until you receive less content than token_budget
+
+          3. For TEXT mode pagination, use text_offset with return_mode="text"
+
+        - **Important:** The offset is applied to the cleaned HTML (after removing scripts,
+          styles, and noise), not the raw HTML. This means you're paginating through
+          content-rich HTML only.
+
+        - **Token Budget Interaction:**
+          - Cleaning happens first (scripts/styles/noise removed)
+          - Then html_offset is applied (skip first N chars)
+          - Finally token_budget truncates the remaining content
+
+        - **Use Cases:**
+          - Product catalogs with 1000+ items
+          - Long documentation pages
+          - Search results with many pages loaded via infinite scroll
+          - Large data tables with 10,000+ rows
     """
-    if session_id not in browser_sessions:
-        logger.error(f"Session {session_id} not found.")
-        return f"Session {session_id} not found. Please start a new browser session."
-
-    driver = browser_sessions[session_id]
-
-    try:
-        driver.get(url)
-        time.sleep(2)  # Allow page to load
-
-        clean_html = get_cleaned_html(driver)
-
-        return f"Navigated to {url}\nTitle: {driver.title}\nHTML: {clean_html}"
-    except Exception as e:
-        return f"Error navigating to {url}: {traceback.format_exc()}"
-
+    result = await MBU.helpers.navigate_to_url(url=url, wait_for=wait_for, timeout_sec=timeout_sec)
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
 
 @mcp.tool()
-async def click_element(session_id: str, selector: str, selector_type: str = "css", timeout: int = 10, force_js: bool = False, iframe_selector: str = None, iframe_selector_type: str = "css", shadow_root_selector: str = None, shadow_root_selector_type: str = "css") -> str:
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__fill_text(
+    selector: str,
+    text: str,
+    selector_type: str = "css",
+    clear_first: bool = True,
+    timeout: float = 10.0,
+    iframe_selector: Optional[str] = None,
+    iframe_selector_type: str = "css",
+    shadow_root_selector: Optional[str] = None,
+    shadow_root_selector_type: str = "css",
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
+) -> str:
     """
-    Clicks an element on the web page, with iframe and shadow root support.
+    MCP tool: Set the value of an input/textarea and return a ContextPack snapshot.
+
+    Focuses the target element, optionally clears existing content, and inserts `text`.
+
+    **Performance Recommendation**: Use token_budget=1000 and cleaning_level=3
+    for most form fills. This is sufficient to verify the action succeeded.
 
     Args:
-        session_id (str): The ID of the browser session.
-        selector (str): The selector for the element to click.
-        selector_type (str, optional): The type of selector. Defaults to 'css'.
-        timeout (int, optional): Maximum wait time for the element to be clickable. Defaults to 10.
-        force_js (bool, optional): If True, uses JavaScript to click the element. Defaults to False.
-        iframe_selector (str, optional): Selector for the iframe. Defaults to None.
-        iframe_selector_type (str, optional): Selector type for the iframe. Defaults to 'css'.
-        shadow_root_selector (str, optional): Selector for the shadow root. Defaults to None.
-        shadow_root_selector_type (str, optional): Selector type for the shadow root. Defaults to 'css'.
+        selector: Element locator (CSS or XPath).
+        text: The exact text to set.
+        selector_type: One of {"css", "xpath"}.
+        clear_first: If True, clear any existing value before typing.
+        click_to_focus: If True, click the element to focus before typing.
+        timeout: Maximum time (seconds) to locate and interact with the element.
+        iframe_selector: Optional iframe locator containing the element.
+        iframe_selector_type: One of {"css", "xpath"}.
+        shadow_root_selector: Optional shadow root host locator.
+        shadow_root_selector_type: One of {"css", "xpath"}.
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
 
     Returns:
-        str: A message indicating successful click, along with the current URL and page title.
+        str: JSON-serialized ContextPack with post-input snapshot.
+
+    Raises:
+        TimeoutError: If the element is not ready within `timeout`.
+        LookupError: If the selector cannot be resolved.
+        ValueError: If `selector_type` or `return_mode` is invalid.
+        RuntimeError: If the browser/driver is not ready.
+
+    Notes:
+        - Use `send_keys` for complex sequences or special keys.
+        - For masked inputs or JS-only fields, consider `force_js` variants if available.
     """
-    if session_id not in browser_sessions:
-        logger.error(f"Session {session_id} not found.")
-        return f"Session {session_id} not found. Please start a new browser session."
-
-    driver = browser_sessions[session_id]
-
-    try:
-        element = find_element(driver, selector, selector_type, timeout, iframe_selector=iframe_selector, iframe_selector_type=iframe_selector_type, shadow_root_selector=shadow_root_selector, shadow_root_selector_type=shadow_root_selector_type)
-
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-        time.sleep(0.5)
-
-        try:
-            if not force_js:
-                element.click()
-            else:
-                raise ElementNotInteractableException("Forcing JavaScript click")
-        except (ElementNotInteractableException, StaleElementReferenceException):
-            try:
-                driver.execute_script("arguments[0].click();", element)
-            except Exception as js_err:
-                logger.error(f"JavaScript click failed: {js_err}")
-                return f"Both native and JavaScript click attempts failed: {js_err}"
-
-        logger.info(f"Clicked element matching '{selector}'. Current URL: {driver.current_url}")
-        return f"Clicked element matching '{selector}'. Current URL: {driver.current_url}\nTitle: {driver.title}"
-    except Exception as e:
-        logger.error(f"Error clicking element: {str(e)}")
-        logger.error(traceback.format_exc())
-        return f"Error clicking element: {str(e)}"
-
+    result = await MBU.helpers.fill_text(
+        selector=selector,
+        text=text,
+        selector_type=selector_type,
+        clear_first=clear_first,
+        timeout=timeout,
+        iframe_selector=iframe_selector,
+        iframe_selector_type=iframe_selector_type,
+        shadow_root_selector=shadow_root_selector,
+        shadow_root_selector_type=shadow_root_selector_type,
+    )
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
 
 @mcp.tool()
-async def read_chromedriver_log(session_id: str, lines: int = 50) -> str:
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__click_element(
+    selector: str,
+    selector_type: str = "css",
+    timeout: float = 10.0,
+    force_js: bool = False,
+    iframe_selector: Optional[str] = None,
+    iframe_selector_type: str = "css",
+    shadow_root_selector: Optional[str] = None,
+    shadow_root_selector_type: str = "css",
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
+) -> str:
     """
-    Fetch the first N lines of the Chromedriver log for debugging.
+    MCP tool: Click an element (optionally inside an iframe or shadow root) and return a snapshot.
+
+    Attempts a native WebDriver click by default; optionally falls back to JS-based click
+    if `force_js` is True or native click is not possible.
+
+    **Performance Recommendation**: Use token_budget=1000 and cleaning_level=3.
+    After clicking, you typically only need to verify the action succeeded.
 
     Args:
-        session_id (str): Browser session ID.
-        lines (int): Number of lines to return from the top of the log.
+        selector: Element locator (CSS or XPath).
+        selector_type: How to interpret `selector`. One of {"css", "xpath"}.
+        timeout: Maximum time (seconds) to locate a clickable element.
+        force_js: If True, use JavaScript-based click instead of native click.
+        iframe_selector: Optional locator of an iframe that contains the target element.
+        iframe_selector_type: One of {"css", "xpath"}; applies to `iframe_selector`.
+        shadow_root_selector: Optional locator whose shadowRoot contains the target element.
+        shadow_root_selector_type: One of {"css", "xpath"}; applies to `shadow_root_selector`.
+        return_mode: Controls the content type in the ContextPack snapshot.
+            {"outline", "text", "html", "dompaths", "mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
+
+    Returns:
+        str: JSON-serialized ContextPack with the snapshot after the click.
+
+    Raises:
+        TimeoutError: If the element is not clickable within `timeout`.
+        LookupError: If the selector cannot be resolved.
+        ValueError: If any selector_type is invalid or `return_mode` is invalid.
+        RuntimeError: If the browser/driver is not ready.
+
+    Notes:
+        - If both `iframe_selector` and `shadow_root_selector` are provided, the function
+          will first resolve the iframe context, then the shadow root context.
+        - Some sites block native clicks; `force_js=True` can bypass those cases, but
+          it may not trigger all browser-level side effects (e.g., focus).
     """
-    log_path = browser_log_paths.get(session_id)
-    if not log_path or not os.path.exists(log_path):
-        return f"No log found for session {session_id}. Expected at: {log_path}"
-
-    output = []
-    with open(log_path, "r", errors="ignore") as f:
-        for _ in range(lines):
-            line = f.readline()
-            if not line:
-                break
-            output.append(line.rstrip("\n"))
-    return "\n".join(output) or f"Log for session {session_id} is empty."
-
+    result = await MBU.helpers.click_element(
+        selector=selector,
+        selector_type=selector_type,
+        timeout=timeout,
+        force_js=force_js,
+        iframe_selector=iframe_selector,
+        iframe_selector_type=iframe_selector_type,
+        shadow_root_selector=shadow_root_selector,
+        shadow_root_selector_type=shadow_root_selector_type,
+    )
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
 
 @mcp.tool()
-async def fill_text(session_id: str, selector: str, text: str, selector_type: str = "css", clear_first: bool = True, timeout: int = 10) -> str:
-    """Input text into an element.
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__take_screenshot(
+    screenshot_path: Optional[str] = None,
+    return_base64: bool = False,
+    return_snapshot: bool = False,
+    thumbnail_width: Optional[int] = None,
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
+) -> str:
+    result = await MBU.helpers.take_screenshot(
+        screenshot_path=screenshot_path,
+        return_base64=return_base64,
+        return_snapshot=return_snapshot,
+        thumbnail_width=thumbnail_width,
+    )
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
+#endregion
+
+#region Tools -- Debugging
+@mcp.tool()
+@tool_envelope
+async def mcp_browser_use__get_debug_diagnostics_info(
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
+) -> str:
+    """
+    MCP tool: Collect driver/browser diagnostics and return a ContextPack.
+
+    Captures diagnostics such as driver session info, user agent, window size, active
+    targets, and other implementation-specific debug fields. Diagnostics are included
+    in the ContextPack's auxiliary section (e.g., `mixed.diagnostics`).
+
+    **Performance Recommendation**: Use token_budget=500 and cleaning_level=3.
+    Diagnostic info is typically metadata, not content.
 
     Args:
-        session_id: Session ID of the browser
-        selector: CSS selector, XPath, or ID of the input field
-        text: Text to enter into the field
-        selector_type: Type of selector (css, xpath, id)
-        clear_first: Whether to clear the field before entering text
-        timeout: Maximum time to wait for the element in seconds
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
+
+    Returns:
+        str: JSON-serialized ContextPack including diagnostics in `mixed`.
+
+    Raises:
+        RuntimeError: If diagnostics cannot be collected.
+        ValueError: If `return_mode` is invalid.
+
+    Notes:
+        - Useful for troubleshooting issues such as stale sessions, blocked popups,
+          or failed navigation. Avoid exposing sensitive values in logs.
     """
-    if session_id not in browser_sessions:
-        return f"Session {session_id} not found. Please start a new browser session."
+    diagnostics = await MBU.helpers.get_debug_diagnostics_info()
+    return await _to_context_pack(
+        result_json=diagnostics,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
+        
+@mcp.tool()
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__debug_element(
+    selector: str,
+    selector_type: str = "css",
+    timeout: float = 10.0,
+    iframe_selector: Optional[str] = None,
+    iframe_selector_type: str = "css",
+    shadow_root_selector: Optional[str] = None,
+    shadow_root_selector_type: str = "css",
+    max_html_length: int = 5000,
+    include_html: bool = True,
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
+) -> str:
+    result = await MBU.helpers.debug_element(
+        selector=selector,
+        selector_type=selector_type,
+        timeout=timeout,
+        iframe_selector=iframe_selector,
+        iframe_selector_type=iframe_selector_type,
+        shadow_root_selector=shadow_root_selector,
+        shadow_root_selector_type=shadow_root_selector_type,
+        max_html_length=max_html_length,
+        include_html=include_html,
+    )
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
+#endregion
 
-    driver = browser_sessions[session_id]
-
-    try:
-        by_selector = get_by_selector(selector_type)
-        wait = WebDriverWait(driver, timeout)
-
-        element = wait.until(
-            EC.element_to_be_clickable((by_selector, selector))
-        )
-
-        # Scroll element into view
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-        time.sleep(0.5)
-
-        if clear_first:
-            # Clear using multiple methods to be thorough
-            element.click()  # Focus the element
-            element.clear()
-            # For stubborn fields, use CTRL+A and Delete
-            element.send_keys(Keys.CONTROL + "a")
-            element.send_keys(Keys.DELETE)
-
-        # Type the text character by character with a small delay
-        for char in text:
-            element.send_keys(char)
-            time.sleep(0.01)  # Small delay between characters
-
-        # Trigger change event to ensure field updates properly
-        driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", element)
-
-        return f"Entered text '{text}' into element matching '{selector}'\nCurrent URL: {driver.current_url}\nTitle: {driver.title}"
-    except TimeoutException:
-        return f"Timeout waiting for element matching '{selector}' to be clickable"
-    except Exception as e:
-        return f"Error entering text: {traceback.format_exc()}"
-
+#region Tools -- Session management
+@mcp.tool()
+@tool_envelope
+@exclusive_browser_access
+async def mcp_browser_use__unlock_browser() -> str:
+    unlock_browser_info = await MBU.helpers.unlock_browser()
+    return unlock_browser_info
 
 @mcp.tool()
-async def send_keys(session_id: str, key: str, selector: str = None, selector_type: str = "css") -> str:
-    """Send keyboard keys to the browser.
+@tool_envelope
+@exclusive_browser_access
+async def mcp_browser_use__close_browser() -> str:
+    close_browser_info = await MBU.helpers.close_browser()
+    return close_browser_info
+
+@mcp.tool()
+@tool_envelope
+async def mcp_browser_use__force_close_all_chrome() -> str:
+    """
+    Force close all Chrome processes and clean up all state.
+
+    Use this to recover from stuck Chrome instances or when normal close_browser fails.
+    This will:
+    - Quit the Selenium driver
+    - Kill all Chrome processes using the MCP profile
+    - Clean up lock files and global state
+
+    Returns:
+        str: JSON with status, killed process IDs, and any errors encountered
+    """
+    return await MBU.helpers.force_close_all_chrome()
+#endregion
+
+#region Tools -- Page interaction
+@mcp.tool()
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__scroll(
+    x: int = 0,
+    y: int = 0,
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 1_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
+) -> str:
+    """
+    MCP tool: Scroll the page or bring an element into view, then return a snapshot.
+
+    If `selector` is provided, the element is scrolled into view. Otherwise the viewport
+    is scrolled by the given pixel deltas (`dx`, `dy`).
+
+    **Performance Recommendation**: Use token_budget=500-1000 and cleaning_level=3.
+    Scrolling typically reveals limited new content that needs minimal tokens.
 
     Args:
-        session_id: Session ID of the browser
-        key: Key to send (e.g., ENTER, TAB, etc.)
-        selector: CSS selector, XPath, or ID of the element to send keys to (optional)
-        selector_type: Type of selector (css, xpath, id)
+        dx: Horizontal pixels to scroll (+right / -left) when no selector is given.
+        dy: Vertical pixels to scroll (+down / -up) when no selector is given.
+        selector: Optional element to scroll into view instead of pixel-based scroll.
+        selector_type: One of {"css", "xpath"}; applies to `selector`.
+        smooth: If True, perform a smooth scroll animation (if supported).
+        timeout: Maximum time (seconds) to locate the `selector` when provided.
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Optional approximate token cap for the returned snapshot.
+
+    Returns:
+        str: JSON-serialized ContextPack with post-scroll snapshot.
+
+    Raises:
+        TimeoutError: If `selector` is provided but not found within `timeout`.
+        ValueError: If `selector_type` or `return_mode` is invalid.
+        RuntimeError: If the browser/driver is not ready.
+
+    Notes:
+        - Some sticky headers may cover targets scrolled into view; consider an offset
+          if your implementation supports it.
     """
-    if session_id not in browser_sessions:
-        return f"Session {session_id} not found. Please start a new browser session."
-
-    driver = browser_sessions[session_id]
-
-    try:
-        key_to_send = getattr(Keys, key.upper(), None)
-        if key_to_send is None:
-            return f"Invalid key: {key}"
-
-        if selector:
-            element = find_element(driver, selector, selector_type)
-            element.send_keys(key_to_send)
-        else:
-            # Send to active element if no selector provided
-            webdriver.ActionChains(driver).send_keys(key_to_send).perform()
-
-        time.sleep(1)  # Allow time for action to complete
-
-        clean_html = get_cleaned_html(driver)
-
-        return f"Sent key '{key}' to {'element matching ' + selector if selector else 'active element'}\nCurrent URL: {driver.current_url}\nTitle: {driver.title}\nHTML: {clean_html}"
-    except Exception as e:
-        return f"Error sending key: {traceback.format_exc()}"
-
+    result = await MBU.helpers.scroll(x=x, y=y)
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
 
 @mcp.tool()
-async def scroll(session_id: str, x: int = 0, y: int = 500) -> str:
-    """Scroll the page.
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__send_keys(
+    key: str,
+    selector: Optional[str] = None,
+    selector_type: str = "css",
+    timeout: float = 10.0,
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 1_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
+) -> str:
+    """
+    MCP tool: Send key strokes to an element and return a ContextPack snapshot.
+
+    Useful for submitting forms (e.g., Enter) or sending special keys (e.g., Tab, Escape).
 
     Args:
-        session_id: Session ID of the browser
-        x: Horizontal scroll amount in pixels
-        y: Vertical scroll amount in pixels
+        selector: Element locator (CSS or XPath).
+        keys: A string or list of key tokens to send. Special keys can be supported by
+            name (e.g., "ENTER", "TAB", "ESCAPE") depending on implementation.
+        selector_type: One of {"css", "xpath"}.
+        timeout: Maximum time (seconds) to locate and focus the element.
+        iframe_selector: Optional iframe locator containing the element.
+        iframe_selector_type: One of {"css", "xpath"}.
+        shadow_root_selector: Optional shadow root host locator.
+        shadow_root_selector_type: One of {"css", "xpath"}.
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
+
+    Returns:
+        str: JSON-serialized ContextPack with snapshot after key events.
+
+    Raises:
+        TimeoutError: If the element is not ready within `timeout`.
+        LookupError: If the selector cannot be resolved.
+        ValueError: If `selector_type` or `return_mode` is invalid.
+        RuntimeError: If the browser/driver is not ready.
+
+    Notes:
+        - Combine with `wait_for_element` to ensure predictable post-typing state.
     """
-    if session_id not in browser_sessions:
-        return f"Session {session_id} not found. Please start a new browser session."
-
-    driver = browser_sessions[session_id]
-
-    try:
-        driver.execute_script(f"window.scrollBy({x}, {y});")
-
-        time.sleep(1)  # Allow time for scroll action to complete
-        clean_html = get_cleaned_html(driver)
-
-        return f"Scrolled by x={x}, y={y}\nCurrent URL: {driver.current_url}\nTitle: {driver.title}\nHTML: {clean_html}"
-    except Exception as e:
-        return f"Error scrolling: {traceback.format_exc()}"
-
+    result = await MBU.helpers.send_keys(
+        key=key,
+        selector=selector,
+        selector_type=selector_type,
+        timeout=timeout,
+    )
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
 
 @mcp.tool()
-async def take_screenshot(session_id: str, screenshot_path: str = None) -> str:
-    """Take a screenshot of the current page.
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__wait_for_element(
+    selector: str,
+    selector_type: str = "css",
+    timeout: float = 10.0,
+    condition: str = "visible",
+    iframe_selector: Optional[str] = None,
+    iframe_selector_type: str = "css",
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 1_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
+) -> str:
+    """
+    MCP tool: Wait for an element to appear (and optionally be visible) and return a snapshot.
+
+    Polls for the presence of the element and (if `visible=True`) a visible display state.
 
     Args:
-        session_id: Session ID of the browser
-        screenshot_path: Optional path to save screenshot file
+        selector: Element locator (CSS or XPath).
+        selector_type: One of {"css", "xpath"}.
+        visible: If True, require that the element is visible (not just present).
+        timeout: Maximum time (seconds) to wait.
+        iframe_selector: Optional iframe locator containing the element.
+        iframe_selector_type: One of {"css", "xpath"}.
+        shadow_root_selector: Optional shadow root host locator.
+        shadow_root_selector_type: One of {"css", "xpath"}.
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
+
+    Returns:
+        str: JSON-serialized ContextPack capturing the page after the wait condition.
+
+    Raises:
+        TimeoutError: If the condition is not met within `timeout`.
+        LookupError: If the selector context cannot be resolved.
+        ValueError: If `selector_type` or `return_mode` is invalid.
+        RuntimeError: If the browser/driver is not ready.
     """
-    if session_id not in browser_sessions:
-        return f"Session {session_id} not found. Please start a new browser session."
-
-    driver = browser_sessions[session_id]
-
-    try:
-        screenshot = driver.get_screenshot_as_base64()
-
-        # Save screenshot to file if path is provided
-        if screenshot_path:
-            with open(screenshot_path, "wb") as f:
-                f.write(driver.get_screenshot_as_png())
-
-        # Truncate to maximum 10 characters
-        try:
-            screenshot = screenshot[:10] + "..."
-        except Exception as e:
-            screenshot = "Error truncating screenshot: " + str(e)
-
-        return f"Screenshot taken successfully. Base64 data: {screenshot}"
-    except Exception as e:
-        return f"Error taking screenshot: {traceback.format_exc()}"
-
-
-@mcp.tool()
-async def close_browser(session_id: str) -> str:
-    """Close a browser session.
-
-    Args:
-        session_id: Session ID of the browser to close
-    """
-    if session_id not in browser_sessions:
-        return f"Session {session_id} not found."
-
-    try:
-        driver = browser_sessions[session_id]
-        driver.quit()
-
-        # Clean up the temporary user data directory
-        if session_id in browser_temp_dirs:
-            user_data_dir = browser_temp_dirs[session_id]
-            if os.path.exists(user_data_dir):
-                shutil.rmtree(user_data_dir)
-                del browser_temp_dirs[session_id]
-
-        # Clean up log path reference
-        if session_id in browser_log_paths:
-            del browser_log_paths[session_id]
-
-        del browser_sessions[session_id]
-
-        return f"Session {session_id} closed successfully"
-    except Exception as e:
-        return f"Error closing session: {traceback.format_exc()}"
-
-
-@mcp.tool()
-async def wait_for_element(session_id: str, selector: str, selector_type: str = "css", timeout: int = 10, condition: str = "visible") -> str:
-    """Wait for an element to be present, visible, or clickable.
-
-    Args:
-        session_id: Session ID of the browser
-        selector: CSS selector, XPath, or ID of the element
-        selector_type: Type of selector (css, xpath, id)
-        timeout: Maximum time to wait in seconds
-        condition: What to wait for - 'present', 'visible', or 'clickable'
-    """
-    if session_id not in browser_sessions:
-        return f"Session {session_id} not found. Please start a new browser session."
-
-    driver = browser_sessions[session_id]
-
-    try:
-        by_selector = get_by_selector(selector_type)
-        wait = WebDriverWait(driver, timeout)
-
-        if condition == "present":
-            element = wait.until(EC.presence_of_element_located((by_selector, selector)))
-        elif condition == "visible":
-            element = wait.until(EC.visibility_of_element_located((by_selector, selector)))
-        elif condition == "clickable":
-            element = wait.until(EC.element_to_be_clickable((by_selector, selector)))
-        else:
-            return f"Invalid condition: {condition}. Use 'present', 'visible', or 'clickable'."
-
-        return f"Element matching '{selector}' is now {condition}"
-    except TimeoutException:
-        return f"Timeout waiting for element matching '{selector}' to be {condition}"
-    except Exception as e:
-        return f"Error waiting for element: {traceback.format_exc()}"
-
-
-@mcp.tool()
-async def get_cookies(session_id: str) -> dict:
-    """Get all cookies for the current session."""
-    if session_id not in browser_sessions:
-        return f"Session {session_id} not found."
-    driver = browser_sessions[session_id]
-    return driver.get_cookies()
-
-
-@mcp.tool()
-async def add_cookie(session_id: str, cookie: dict) -> str:
-    """Add a cookie to the current session."""
-    if session_id not in browser_sessions:
-        return f"Session {session_id} not found."
-    driver = browser_sessions[session_id]
-    driver.add_cookie(cookie)
-    return "Cookie added successfully."
-
-
-@mcp.tool()
-async def delete_cookie(session_id: str, name: str) -> str:
-    """Delete a cookie by name."""
-    if session_id not in browser_sessions:
-        return f"Session {session_id} not found."
-    driver = browser_sessions[session_id]
-    driver.delete_cookie(name)
-    return f"Cookie '{name}' deleted successfully."
-
-
-@mcp.tool()
-async def debug_element(session_id: str, selector: str, selector_type: str = "css") -> str:
-    """Debug why an element might not be clickable or visible.
-
-    Args:
-        session_id: Session ID of the browser
-        selector: CSS selector, XPath, or ID of the element
-        selector_type: Type of selector (css, xpath, id)
-    """
-    if session_id not in browser_sessions:
-        return f"Session {session_id} not found. Please start a new browser session."
-
-    driver = browser_sessions[session_id]
-
-    try:
-        by_selector = get_by_selector(selector_type)
-
-        # First check if element exists
-        try:
-            element = driver.find_element(by_selector, selector)
-        except Exception as e:
-            return f"Element not found: {traceback.format_exc()}"
-
-        # Get element properties
-        is_displayed = element.is_displayed()
-        is_enabled = element.is_enabled()
-        tag_name = element.tag_name
-
-        # Get CSS properties that might affect visibility
-        css_properties = {}
-        for prop in ['display', 'visibility', 'opacity', 'height', 'width', 'position', 'z-index']:
-            css_properties[prop] = driver.execute_script(f"return window.getComputedStyle(arguments[0]).getPropertyValue('{prop}')", element)
-
-        # Check if element is in viewport
-        in_viewport = driver.execute_script("""
-            var elem = arguments[0];
-            var rect = elem.getBoundingClientRect();
-            return (
-                rect.top >= 0 &&
-                rect.left >= 0 &&
-                rect.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
-                rect.right <= (window.innerWidth || document.documentElement.clientWidth)
-            );
-        """, element)
-
-        # Check for overlapping elements
-        is_covered = driver.execute_script("""
-            var elem = arguments[0];
-            var rect = elem.getBoundingClientRect();
-            var centerX = rect.left + rect.width / 2;
-            var centerY = rect.top + rect.height / 2;
-            var element = document.elementFromPoint(centerX, centerY);
-            return element !== elem;
-        """, element)
-
-        return f"""Debug info for element matching '{selector}':
-- Tag name: {tag_name}
-- Displayed: {is_displayed}
-- Enabled: {is_enabled}
-- In viewport: {in_viewport}
-- Covered by another element: {is_covered}
-- CSS properties: {css_properties}
-"""
-    except Exception as e:
-        return f"Error debugging element: {traceback.format_exc()}"
+    result = await MBU.helpers.wait_for_element(
+        selector=selector,
+        selector_type=selector_type,
+        timeout=timeout,
+        condition=condition,
+        iframe_selector=iframe_selector,
+        iframe_selector_type=iframe_selector_type,
+    )
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
+#endregion
 
 
 if __name__ == "__main__":
-    try:
-        logger.info("Starting Selenium MCP server...")
-        mcp.run(transport='stdio')
-    except Exception as e:
-        logger.error(f"MCP Server Error: {e}")
-        logger.error(traceback.format_exc())
-        sys.exit(1)
+    mcp.run()

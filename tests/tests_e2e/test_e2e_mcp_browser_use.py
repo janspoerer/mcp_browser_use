@@ -17,9 +17,8 @@ def load_env():
     """
     load_dotenv()
 
-##
 ## We DO NOT want to use pytest-asyncio.
-##
+## Instead, use event_loop.run_until_complete()!
 
 @pytest.fixture
 def config_file():
@@ -31,13 +30,13 @@ logger:
     progress_display: false
     show_chat: false
     show_tools: true
-    truncate_tools: true
+    truncate_tools: false
 
 mcp:
     servers:
         mcp_browser_use:
-            command: "/home/janspoerer/code/all_repos/mcp_browser_use/.venv/bin/python"
-            args: ["/home/janspoerer/code/all_repos/mcp_browser_use/mcp_browser_use"]
+            command: '{sys.executable.replace("\\\\", "\\\\\\\\")}'
+            args: ["-m", "mcp_browser_use"]
 """
     with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
         f.write(config_content)
@@ -64,13 +63,13 @@ class TestE2EMCPBrowserUse:
     def test_browser_lifecycle(self, fast_agent, event_loop):
         """Test complete browser lifecycle: start, navigate, interact, close"""
 
-        @fast_agent.agent(instruction="You are a browser automation test agent. Follow instructions precisely and report results clearly.")
+        @fast_agent.agent(instruction="You are a browser automation test agent. If you cannot do this, please explain why. List the MCP servers that you have access to.")
         async def test_agent():
             async with fast_agent.run() as agent:
                 # Test 1: Start browser
                 response = await agent.send("Start a new browser session in headed mode")
 
-                assert "Browser session created successfully" in response
+                assert "Browser session created" in response
                 assert "Session ID:" in response
 
                 # Extract session ID from response
@@ -447,11 +446,11 @@ class TestMCPToolFunctions:
             async with fast_agent.run() as agent:
                 # Test headless browser start
                 response = await agent("Use the start_browser tool with headless=True")
-                assert "Browser session created successfully" in response
+                assert "Browser session created" in response
 
                 # Test non-headless browser start
                 response = await agent("Use the start_browser tool with headless=False")
-                assert "Browser session created successfully" in response
+                assert "Browser session created" in response
 
                 return True
 

@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/janspoerer-mcp-browser-use-badge.png)](https://mseep.ai/app/janspoerer-mcp-browser-use)
+
 
 # MCP Browser Use
 

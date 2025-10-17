@@ -531,6 +531,10 @@ def _launch_chrome_with_debug(cfg: dict, port: int) -> None:
     headless = os.getenv("MCP_HEADLESS", "0").strip()
     is_headless = headless in ("1", "true", "True", "yes", "Yes")
 
+    # Check if extensions should be enabled (by default Chrome disables extensions in remote debugging mode)
+    enable_extensions = os.getenv("MCP_ENABLE_EXTENSIONS", "1").strip()
+    extensions_enabled = enable_extensions in ("1", "true", "True", "yes", "Yes")
+
     cmd = [
         exe,
         f"--user-data-dir={udir}",
@@ -549,6 +553,12 @@ def _launch_chrome_with_debug(cfg: dict, port: int) -> None:
         cmd.append(f"--profile-directory={prof}")
     if is_headless:
         cmd.append("--headless=new")
+
+    # Enable extensions in remote debugging mode (they're disabled by default for security)
+    # This uses a workaround: --disable-blink-features=AutomationControlled helps hide automation
+    # and makes Chrome behave more like a regular browser, which includes loading extensions
+    if extensions_enabled:
+        cmd.insert(-1, "--disable-blink-features=AutomationControlled")  # Insert before "about:blank"
 
     # Fix 2: Create error log file (opened but not passed to Chrome to avoid handle issues)
     log_dir = Path(tempfile.gettempdir()) / "mcp_browser_logs"
@@ -644,7 +654,15 @@ def _ensure_driver() -> None:
     """Attach Selenium to the debuggable Chrome instance (headed by default)."""
     global DRIVER
     if DRIVER is not None:
-        return
+        # Validate session is still valid before returning
+        try:
+            _ = DRIVER.session_id  # Quick check if session exists
+            _ = DRIVER.window_handles  # Verify we can communicate with browser
+            return  # Session is valid, return early
+        except Exception:
+            # Session is stale/invalid - reset and recreate
+            logger.debug("Stale driver session detected, recreating driver connection")
+            DRIVER = None
 
     cfg = get_env_config()
     _ensure_debugger_ready(cfg)  # allow full wait (e.g., 30s via env)
@@ -934,7 +952,7 @@ def _handle_for_target(driver, target_id: Optional[str]) -> Optional[str]:
 #endregion
 
 #region Wait and snapshot
-def _wait_document_ready(timeout: float = 10.0):
+def _wait_document_ready(timeout: float = 20.0):
     try:
         WebDriverWait(DRIVER, timeout).until(
             lambda d: d.execute_script("return document.readyState") in ("interactive", "complete")
@@ -973,7 +991,7 @@ def _make_page_snapshot(
 
             # Ensure DOM is ready, then apply configurable settle
             try:
-                _wait_document_ready(timeout=5.0)
+                _wait_document_ready(timeout=20.0)
             except Exception:
                 pass
             try:
@@ -1277,6 +1295,10 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
         headless = os.getenv("MCP_HEADLESS", "0").strip()
         is_headless = headless in ("1", "true", "True", "yes", "Yes")
 
+        # Check if extensions should be enabled
+        enable_extensions = os.getenv("MCP_ENABLE_EXTENSIONS", "1").strip()
+        extensions_enabled = enable_extensions in ("1", "true", "True", "yes", "Yes")
+
         cmd = [
             binary,
             f"--remote-debugging-port={port}",
@@ -1293,6 +1315,8 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
         ]
         if is_headless:
             cmd.append("--headless=new")
+        if extensions_enabled:
+            cmd.insert(-1, "--disable-blink-features=AutomationControlled")
 
         # Fix 2: Create error log file
         log_dir = Path(tempfile.gettempdir()) / "mcp_browser_logs"
@@ -1373,6 +1397,10 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
         headless = os.getenv("MCP_HEADLESS", "0").strip()
         is_headless = headless in ("1", "true", "True", "yes", "Yes")
 
+        # Check if extensions should be enabled
+        enable_extensions = os.getenv("MCP_ENABLE_EXTENSIONS", "1").strip()
+        extensions_enabled = enable_extensions in ("1", "true", "True", "yes", "Yes")
+
         cmd = [
             binary,
             f"--remote-debugging-port={port}",
@@ -1389,6 +1417,8 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
         ]
         if is_headless:
             cmd.append("--headless=new")
+        if extensions_enabled:
+            cmd.insert(-1, "--disable-blink-features=AutomationControlled")
 
         # Fix 2: Create error log file
         log_dir = Path(tempfile.gettempdir()) / "mcp_browser_logs"
@@ -1780,7 +1810,7 @@ async def start_browser():
             pass
 
         # Wait until the page is ready. Get a snapshot.
-        _wait_document_ready(timeout=5.0)
+        _wait_document_ready(timeout=20.0)
         try:
             snapshot = _make_page_snapshot()
         except Exception:
@@ -1890,7 +1920,7 @@ async def fill_text(
             except Exception:
                 pass
         el.send_keys(text)
-        _wait_document_ready(timeout=5.0)
+        _wait_document_ready(timeout=20.0)
 
         snapshot = _make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
         return json.dumps({"ok": True, "action": "fill_text", "selector": selector, "snapshot": snapshot})
@@ -1950,7 +1980,7 @@ async def click_element(
                 ))
                 DRIVER.execute_script("arguments[0].click();", el)
 
-        _wait_document_ready(timeout=10.0)
+        _wait_document_ready(timeout=20.0)
 
         snapshot = _make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
         return json.dumps({

@@ -161,7 +161,8 @@ take_screenshot
 close_browser
 ```
 > Close a browser session.
-> 
+> This is a very destructive action and should not be done without explicit request from the user!
+> Never use this tool unless you are explicitly being told to!
 
 
 ```
@@ -340,7 +341,7 @@ async def mcp_browser_use__start_browser(
 async def mcp_browser_use__navigate_to_url(
     url: str,
     wait_for: str = "load",
-    timeout_sec: int = 30,
+    timeout_sec: int = 20,
     return_mode: str = "outline",
     cleaning_level: int = 2,
     token_budget: int = 5_000,
@@ -356,12 +357,15 @@ async def mcp_browser_use__navigate_to_url(
     Args:
         url: Absolute URL to navigate to (e.g., "https://example.com").
         wait_for: Wait condition - "load" (default) or "complete".
-        timeout_sec: Maximum time (seconds) to wait for navigation readiness.
+        timeout_sec: Maximum time (seconds) to wait for navigation readiness. Waits for asynchronous data to load.
+            Some shops such as Buderus.de are very slow and require a longer timeout of about 30 seconds.
         return_mode: Controls the content type in the ContextPack snapshot. One of
             {"outline", "text", "html", "dompaths", "mixed"}.
         cleaning_level: Structural/content cleaning intensity for snapshot rendering.
             0 = none, 1 = light, 2 = default, 3 = aggressive.
-        token_budget: Approximate token cap for the returned snapshot.
+        token_budget: Approximate token cap for the returned snapshot. Never use token budgets larger than 10_000!
+            Be very conservative with the token budgets. They will clog up your context window very quickly.
+            A token budget of 5_000  is usually enought if you are smart with the offset settings.
         text_offset: Optional character offset to start text extraction (for pagination).
             Only applies when return_mode="text".
             Example: Use text_offset=10000 to skip the first 10,000 characters.
@@ -692,6 +696,11 @@ async def mcp_browser_use__unlock_browser() -> str:
 @tool_envelope
 @exclusive_browser_access
 async def mcp_browser_use__close_browser() -> str:
+    """
+    This is a very destructive action and should not be done without explicit request from the user!
+
+    Simply do not use this! It is very bad!
+    """
     close_browser_info = await MBU.helpers.close_browser()
     return close_browser_info
 
@@ -700,6 +709,10 @@ async def mcp_browser_use__close_browser() -> str:
 async def mcp_browser_use__force_close_all_chrome() -> str:
     """
     Force close all Chrome processes and clean up all state.
+
+    This is a very destructive action and should not be done without explicit request from the user!
+
+    Simply do not use this! It is very bad!
 
     Use this to recover from stuck Chrome instances or when normal close_browser fails.
     This will:
@@ -723,7 +736,7 @@ async def mcp_browser_use__scroll(
     y: int = 0,
     return_mode: str = "outline",
     cleaning_level: int = 2,
-    token_budget: int = 1_000,
+    token_budget: int = 100,
     text_offset: Optional[int] = None,
     html_offset: Optional[int] = None,
 ) -> str:
@@ -742,7 +755,7 @@ async def mcp_browser_use__scroll(
         timeout: Maximum time (seconds) to locate the `selector` when provided.
         return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
         cleaning_level: Structural/content cleaning intensity (0–3).
-        token_budget: Optional approximate token cap for the returned snapshot.
+        token_budget: Optional approximate token cap for the returned snapshot. It is generally advisable to set a very low token budget when scrolling.
 
     Returns:
         str: JSON-serialized ContextPack with post-scroll snapshot.

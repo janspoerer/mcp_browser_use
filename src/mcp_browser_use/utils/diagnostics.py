@@ -42,6 +42,9 @@ def collect_diagnostics(driver: Optional[webdriver.Chrome], exc: Optional[Except
         parts.append(f"Driver version    : {drv_ver}")
         opts = cap.get("goog:chromeOptions") or {}
         args = opts.get("args") or []
+        # Ensure args is iterable
+        if not isinstance(args, (list, tuple)):
+            args = []
         parts.append(f"Chrome args       : {' '.join(args)}")
     if exc:
         parts += [

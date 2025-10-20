@@ -1,26 +1,34 @@
-"""Diagnostics and debugging information."""
+"""Diagnostics and debugging information utility functions."""
 
-import os
 import sys
-import json
 import platform
-import traceback
 from typing import Optional
 from selenium import webdriver
 import selenium
 
+# Import helpers module to access globals (avoids circular imports)
+import mcp_browser_use.helpers as helpers
+
 
 def collect_diagnostics(driver: Optional[webdriver.Chrome], exc: Optional[Exception], config: dict) -> str:
-    """Collect diagnostic information about the browser state."""
-    from ..browser.chrome import _chrome_binary_for_platform
+    """
+    Collect diagnostic information about the browser, driver, and environment.
 
+    Args:
+        driver: Selenium WebDriver instance (can be None)
+        exc: Exception that occurred (can be None)
+        config: Configuration dictionary with user_data_dir, profile_name, chrome_path
+
+    Returns:
+        str: Formatted diagnostic information
+    """
     parts = [
         f"OS                : {platform.system()} {platform.release()}",
         f"Python            : {sys.version.split()[0]}",
         f"Selenium          : {getattr(selenium, '__version__', '?')}",
         f"User-data dir     : {config.get('user_data_dir')}",
         f"Profile name      : {config.get('profile_name')}",
-        f"Chrome binary     : {config.get('chrome_path') or _chrome_binary_for_platform(config)}",
+        f"Chrome binary     : {config.get('chrome_path') or helpers._chrome_binary_for_platform(config)}",
     ]
     if driver:
         try:
@@ -44,28 +52,4 @@ def collect_diagnostics(driver: Optional[webdriver.Chrome], exc: Optional[Except
     return "\n".join(parts)
 
 
-def get_debug_diagnostics_info() -> dict:
-    """Get diagnostic information about the current state"""
-    from ..helpers import DRIVER, DEBUGGER_HOST, DEBUGGER_PORT, TARGET_ID
-
-    info = {
-        "has_driver": DRIVER is not None,
-        "debugger_host": DEBUGGER_HOST,
-        "debugger_port": DEBUGGER_PORT,
-        "target_id": TARGET_ID,
-    }
-
-    if DRIVER:
-        try:
-            info["current_url"] = DRIVER.current_url
-            info["window_handles"] = len(DRIVER.window_handles)
-        except Exception as e:
-            info["driver_error"] = str(e)
-
-    return info
-
-
-__all__ = [
-    'collect_diagnostics',
-    'get_debug_diagnostics_info',
-]
+__all__ = ['collect_diagnostics']

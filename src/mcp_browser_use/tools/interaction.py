@@ -28,10 +28,10 @@ async def fill_text(
 ):
     try:
 
-        el = helpers.retry_op(lambda: helpers.find_element(
-            helpers.DRIVER,
-            selector,
-            selector_type,
+        el = helpers.retry_op(op=lambda: helpers.find_element(
+            driver=helpers.DRIVER,
+            selector=selector,
+            selector_type=selector_type,
             timeout=int(timeout),
             visible_only=True,
             iframe_selector=iframe_selector,
@@ -49,11 +49,11 @@ async def fill_text(
         el.send_keys(text)
         helpers._wait_document_ready(timeout=5.0)
 
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
+        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
         return json.dumps({"ok": True, "action": "fill_text", "selector": selector, "snapshot": snapshot})
     except Exception as e:
-        diag = collect_diagnostics(helpers.DRIVER, e, helpers.get_env_config())
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
+        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
+        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
     finally:
         try:
@@ -77,10 +77,10 @@ async def click_element(
 ) -> str:
     try:
 
-        el = helpers.retry_op(lambda: helpers.find_element(
-            helpers.DRIVER,
-            selector,
-            selector_type,
+        el = helpers.retry_op(op=lambda: helpers.find_element(
+            driver=helpers.DRIVER,
+            selector=selector,
+            selector_type=selector_type,
             timeout=int(timeout),
             visible_only=True,
             iframe_selector=iframe_selector,
@@ -90,7 +90,7 @@ async def click_element(
             stay_in_context=True,
         ))
 
-        helpers._wait_clickable_element(el, helpers.DRIVER, timeout=timeout)
+        helpers._wait_clickable_element(el=el, driver=helpers.DRIVER, timeout=timeout)
 
         if force_js:
             helpers.DRIVER.execute_script("arguments[0].click();", el)
@@ -98,18 +98,23 @@ async def click_element(
             try:
                 el.click()
             except (ElementClickInterceptedException, StaleElementReferenceException):
-                el = helpers.retry_op(lambda: helpers.find_element(
-                    helpers.DRIVER, selector, selector_type, timeout=int(timeout),
+                el = helpers.retry_op(op=lambda: helpers.find_element(
+                    driver=helpers.DRIVER,
+                    selector=selector,
+                    selector_type=selector_type,
+                    timeout=int(timeout),
                     visible_only=True,
-                    iframe_selector=iframe_selector, iframe_selector_type=iframe_selector_type,
-                    shadow_root_selector=shadow_root_selector, shadow_root_selector_type=shadow_root_selector_type,
+                    iframe_selector=iframe_selector,
+                    iframe_selector_type=iframe_selector_type,
+                    shadow_root_selector=shadow_root_selector,
+                    shadow_root_selector_type=shadow_root_selector_type,
                     stay_in_context=True,
                 ))
                 helpers.DRIVER.execute_script("arguments[0].click();", el)
 
         helpers._wait_document_ready(timeout=10.0)
 
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
+        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
         return json.dumps({
             "ok": True,
             "action": "click",
@@ -118,7 +123,7 @@ async def click_element(
             "snapshot": snapshot,
         })
     except TimeoutException:
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
+        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
         return json.dumps({
             "ok": False,
             "error": "timeout",
@@ -127,8 +132,8 @@ async def click_element(
             "snapshot": snapshot,
         })
     except Exception as e:
-        diag = collect_diagnostics(helpers.DRIVER, e, helpers.get_env_config())
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
+        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
+        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
     finally:
         try:
@@ -198,10 +203,10 @@ async def send_keys(
 
         if selector:
             # Send keys to specific element
-            el = helpers.retry_op(lambda: helpers.find_element(
-                helpers.DRIVER,
-                selector,
-                selector_type,
+            el = helpers.retry_op(op=lambda: helpers.find_element(
+                driver=helpers.DRIVER,
+                selector=selector,
+                selector_type=selector_type,
                 timeout=int(timeout),
                 visible_only=True,
             ))
@@ -222,7 +227,7 @@ async def send_keys(
             "snapshot": snapshot,
         })
     except Exception as e:
-        diag = collect_diagnostics(helpers.DRIVER, e, helpers.get_env_config())
+        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
         snapshot = helpers._make_page_snapshot()
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 
@@ -255,9 +260,9 @@ async def wait_for_element(
         visible_only = condition in ("visible", "clickable")
 
         el = helpers.find_element(
-            helpers.DRIVER,
-            selector,
-            selector_type,
+            driver=helpers.DRIVER,
+            selector=selector,
+            selector_type=selector_type,
             timeout=int(timeout),
             visible_only=visible_only,
             iframe_selector=iframe_selector,
@@ -265,7 +270,7 @@ async def wait_for_element(
         )
 
         if condition == "clickable":
-            helpers._wait_clickable_element(el, helpers.DRIVER, timeout=timeout)
+            helpers._wait_clickable_element(el=el, driver=helpers.DRIVER, timeout=timeout)
 
         snapshot = helpers._make_page_snapshot()
         return json.dumps({
@@ -289,7 +294,7 @@ async def wait_for_element(
             "message": f"Element '{selector}' did not become {condition} within {timeout}s"
         })
     except Exception as e:
-        diag = collect_diagnostics(helpers.DRIVER, e, helpers.get_env_config())
+        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
         snapshot = helpers._make_page_snapshot()
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
     finally:

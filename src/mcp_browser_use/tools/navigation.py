@@ -46,16 +46,13 @@ async def navigate_to_url(
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 
 
-async def scroll(x: int, y: int, max_snapshot_chars=0, aggressive_cleaning=False, offset_chars=0) -> str:
+async def scroll(x: int, y: int) -> str:
     """
     Scroll the page by the specified pixel amounts.
 
     Args:
         x: Horizontal scroll amount in pixels (positive = right, negative = left)
         y: Vertical scroll amount in pixels (positive = down, negative = up)
-        max_snapshot_chars: Maximum HTML characters to return (default: 0 to save context)
-        aggressive_cleaning: Whether to apply aggressive HTML cleaning
-        offset_chars: Number of characters to skip from start of HTML (default: 0)
 
     Returns:
         JSON string with ok status, action, scroll amounts, and page snapshot
@@ -69,11 +66,7 @@ async def scroll(x: int, y: int, max_snapshot_chars=0, aggressive_cleaning=False
         ctx.driver.execute_script(f"window.scrollBy({int(x)}, {int(y)});")
         time.sleep(0.3)  # Brief pause to allow scroll to complete
 
-        snapshot = _make_page_snapshot(
-            max_snapshot_chars=max_snapshot_chars,
-            aggressive_cleaning=aggressive_cleaning,
-            offset_chars=offset_chars
-        )
+        snapshot = _make_page_snapshot()
         return json.dumps({
             "ok": True,
             "action": "scroll",
@@ -84,11 +77,7 @@ async def scroll(x: int, y: int, max_snapshot_chars=0, aggressive_cleaning=False
 
     except Exception as e:
         diag = collect_diagnostics(driver=ctx.driver, exc=e, config=ctx.config)
-        snapshot = _make_page_snapshot(
-            max_snapshot_chars=max_snapshot_chars,
-            aggressive_cleaning=aggressive_cleaning,
-            offset_chars=offset_chars
-        )
+        snapshot = _make_page_snapshot()
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 
 

@@ -472,30 +472,30 @@ def basic_prune(
     soup = bs4.BeautifulSoup(html or "", "html.parser")
 
     # Phase 0: Remove HTML comments
-    _remove_comments(soup, pruned_counts)
+    _remove_comments(soup=soup, pruned_counts=pruned_counts)
 
     # Phase 1: Remove scripts, styles, and non-content tags
-    _remove_scripts_and_styles(soup, pruned_counts)
+    _remove_scripts_and_styles(soup=soup, pruned_counts=pruned_counts)
 
     # Phase 2: Remove noise containers and hidden elements (if level >= 1)
     if level >= 1:
-        _remove_noise_containers(soup, pruned_counts, prune_hidden)
+        _remove_noise_containers(soup=soup, pruned_counts=pruned_counts, prune_hidden=prune_hidden)
 
     # Phase 2.5: Strip CDN links (if enabled)
     if remove_cdn_links:
-        _clean_cdn_links(soup, pruned_counts, cdn_host_patterns, drop_cdn_elements)
+        _clean_cdn_links(soup=soup, pruned_counts=pruned_counts, cdn_host_patterns=cdn_host_patterns, drop_cdn_elements=drop_cdn_elements)
 
     # Phase 3: Prune attributes (if level >= 2)
     if level >= 2:
-        _prune_attributes(soup, pruned_counts, prune_classes_except_buttons)
+        _prune_attributes(soup=soup, pruned_counts=pruned_counts, prune_classes_except_buttons=prune_classes_except_buttons)
 
     # Phase 4: Collapse wrappers (if level >= 3)
     if level >= 3:
-        _collapse_wrappers(soup, pruned_counts)
+        _collapse_wrappers(soup=soup, pruned_counts=pruned_counts)
 
     # Phase 5: Normalize whitespace (if enabled)
     if prune_linebreaks:
-        html_out = _normalize_whitespace(soup, pruned_counts)
+        html_out = _normalize_whitespace(soup=soup, pruned_counts=pruned_counts)
     else:
         html_out = str(soup)
 

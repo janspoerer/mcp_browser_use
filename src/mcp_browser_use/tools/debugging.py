@@ -4,17 +4,23 @@ import json
 from pathlib import Path
 from typing import Dict, Any
 from selenium.common.exceptions import TimeoutException
-import mcp_browser_use.helpers as helpers
-from mcp_browser_use.utils.diagnostics import collect_diagnostics
+from ..context import get_context
+from ..utils.diagnostics import collect_diagnostics
+from ..actions.elements import find_element, _wait_clickable_element
+from ..actions.screenshots import _make_page_snapshot
+from ..utils.retry import retry_op
 
 
 async def get_debug_diagnostics_info() -> str:
+    """Get debug diagnostics using context."""
+    ctx = get_context()
+
     try:
-        cfg = helpers.get_env_config()
+        cfg = ctx.config
         udir = cfg.get("user_data_dir")
         port_file = str(Path(udir) / "DevToolsActivePort") if udir else None
 
-        # Read DevToolsActivePort without relying on helpers
+        # Read DevToolsActivePort
         port_val = None
         if udir:
             p = Path(udir) / "DevToolsActivePort"
@@ -33,22 +39,28 @@ async def get_debug_diagnostics_info() -> str:
             except Exception:
                 devtools_http = {"ok": False}
 
-        diag_summary = collect_diagnostics(driver=helpers.DRIVER, exc=None, config=cfg)  # string
+        diag_summary = collect_diagnostics(driver=ctx.driver, exc=None, config=cfg)
         diagnostics = {
             "summary": diag_summary,
-            "driver_initialized": bool(helpers.DRIVER),
-            "debugger": f"{helpers.DEBUGGER_HOST}:{helpers.DEBUGGER_PORT}" if (helpers.DEBUGGER_HOST and helpers.DEBUGGER_PORT) else None,
+            "driver_initialized": ctx.is_driver_initialized(),
+            "debugger": ctx.get_debugger_address(),
             "devtools_active_port_file": {"path": port_file, "port": port_val, "exists": port_val is not None},
             "devtools_http_version": devtools_http,
+            "context_state": {
+                "driver_initialized": ctx.is_driver_initialized(),
+                "window_ready": ctx.is_window_ready(),
+                "debugger_address": ctx.get_debugger_address(),
+                "process_tag": ctx.process_tag,
+            }
         }
 
-        snapshot = (helpers._make_page_snapshot()
-                    if helpers.DRIVER
+        snapshot = (_make_page_snapshot()
+                    if ctx.is_driver_initialized()
                     else {"url": None, "title": None, "html": "", "truncated": False})
         return json.dumps({"ok": True, "diagnostics": diagnostics, "snapshot": snapshot})
-    except Exception as e:
 
-        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
+    except Exception as e:
+        diag = collect_diagnostics(driver=ctx.driver, exc=e, config=ctx.config)
         return json.dumps({"ok": False, "error": str(e), "diagnostics": {"summary": diag}})
 
 async def debug_element(
@@ -79,6 +91,8 @@ async def debug_element(
     Returns:
         JSON string with debug information
     """
+    ctx = get_context()
+
     try:
         info: Dict[str, Any] = {
             "selector": selector,
@@ -94,8 +108,8 @@ async def debug_element(
         }
 
         try:
-            el = helpers.retry_op(op=lambda: helpers.find_element(
-                driver=helpers.DRIVER,
+            el = retry_op(op=lambda: find_element(
+                driver=ctx.driver,
                 selector=selector,
                 selector_type=selector_type,
                 timeout=int(timeout),
@@ -118,7 +132,7 @@ async def debug_element(
                 info["enabled"] = None
 
             try:
-                helpers._wait_clickable_element(el=el, driver=helpers.DRIVER, timeout=timeout)
+                _wait_clickable_element(el=el, driver=ctx.driver, timeout=timeout)
                 info["clickable"] = True
             except Exception:
                 info["clickable"] = False
@@ -137,7 +151,7 @@ async def debug_element(
             # Get HTML if requested
             if include_html:
                 try:
-                    html = helpers.DRIVER.execute_script("return arguments[0].outerHTML;", el)
+                    html = ctx.driver.execute_script("return arguments[0].outerHTML;", el)
                     # Clean invalid characters
                     html = html.replace('\x00', '').encode('utf-8', errors='ignore').decode('utf-8')
 
@@ -162,16 +176,18 @@ async def debug_element(
         except Exception as e:
             info["notes"].append(f"Error while probing element: {repr(e)}")
 
-        snapshot = helpers._make_page_snapshot()
+        snapshot = _make_page_snapshot()
         return json.dumps({"ok": True, "debug": info, "snapshot": snapshot})
+
     except Exception as e:
-        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
-        snapshot = helpers._make_page_snapshot()
+        diag = collect_diagnostics(driver=ctx.driver, exc=e, config=ctx.config)
+        snapshot = _make_page_snapshot()
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+
     finally:
         try:
-            if helpers.DRIVER is not None:
-                helpers.DRIVER.switch_to.default_content()
+            if ctx.is_driver_initialized():
+                ctx.driver.switch_to.default_content()
         except Exception:
             pass
 

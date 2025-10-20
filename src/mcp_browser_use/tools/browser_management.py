@@ -13,8 +13,8 @@ from ..browser.driver import (
     _ensure_driver_and_window,
     close_singleton_window,
     _close_extra_blank_windows_safe,
+    ensure_process_tag,
 )
-from ..browser.process import ensure_process_tag
 from ..actions.navigation import _wait_document_ready
 from ..actions.screenshots import _make_page_snapshot
 from ..locking.action_lock import _release_action_lock

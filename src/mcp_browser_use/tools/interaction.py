@@ -8,8 +8,12 @@ from selenium.common.exceptions import (
     StaleElementReferenceException,
     ElementClickInterceptedException,
 )
-import mcp_browser_use.helpers as helpers
-from mcp_browser_use.utils.diagnostics import collect_diagnostics
+from ..context import get_context
+from ..utils.diagnostics import collect_diagnostics
+from ..actions.elements import find_element, _wait_clickable_element
+from ..actions.navigation import _wait_document_ready
+from ..actions.screenshots import _make_page_snapshot
+from ..utils.retry import retry_op
 
 
 async def fill_text(
@@ -26,10 +30,12 @@ async def fill_text(
     aggressive_cleaning=False,
     offset_chars=0,
 ):
-    try:
+    """Fill text into an element."""
+    ctx = get_context()
 
-        el = helpers.retry_op(op=lambda: helpers.find_element(
-            driver=helpers.DRIVER,
+    try:
+        el = retry_op(op=lambda: find_element(
+            driver=ctx.driver,
             selector=selector,
             selector_type=selector_type,
             timeout=int(timeout),
@@ -47,18 +53,28 @@ async def fill_text(
             except Exception:
                 pass
         el.send_keys(text)
-        helpers._wait_document_ready(timeout=5.0)
+        _wait_document_ready(timeout=5.0)
 
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
+        snapshot = _make_page_snapshot(
+            max_snapshot_chars=max_snapshot_chars,
+            aggressive_cleaning=aggressive_cleaning,
+            offset_chars=offset_chars
+        )
         return json.dumps({"ok": True, "action": "fill_text", "selector": selector, "snapshot": snapshot})
+
     except Exception as e:
-        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
+        diag = collect_diagnostics(driver=ctx.driver, exc=e, config=ctx.config)
+        snapshot = _make_page_snapshot(
+            max_snapshot_chars=max_snapshot_chars,
+            aggressive_cleaning=aggressive_cleaning,
+            offset_chars=offset_chars
+        )
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+
     finally:
         try:
-            if helpers.DRIVER is not None:
-                helpers.DRIVER.switch_to.default_content()
+            if ctx.is_driver_initialized():
+                ctx.driver.switch_to.default_content()
         except Exception:
             pass
 
@@ -75,10 +91,12 @@ async def click_element(
     aggressive_cleaning=False,
     offset_chars=0,
 ) -> str:
-    try:
+    """Click an element."""
+    ctx = get_context()
 
-        el = helpers.retry_op(op=lambda: helpers.find_element(
-            driver=helpers.DRIVER,
+    try:
+        el = retry_op(op=lambda: find_element(
+            driver=ctx.driver,
             selector=selector,
             selector_type=selector_type,
             timeout=int(timeout),
@@ -90,16 +108,16 @@ async def click_element(
             stay_in_context=True,
         ))
 
-        helpers._wait_clickable_element(el=el, driver=helpers.DRIVER, timeout=timeout)
+        _wait_clickable_element(el=el, driver=ctx.driver, timeout=timeout)
 
         if force_js:
-            helpers.DRIVER.execute_script("arguments[0].click();", el)
+            ctx.driver.execute_script("arguments[0].click();", el)
         else:
             try:
                 el.click()
             except (ElementClickInterceptedException, StaleElementReferenceException):
-                el = helpers.retry_op(op=lambda: helpers.find_element(
-                    driver=helpers.DRIVER,
+                el = retry_op(op=lambda: find_element(
+                    driver=ctx.driver,
                     selector=selector,
                     selector_type=selector_type,
                     timeout=int(timeout),
@@ -110,11 +128,15 @@ async def click_element(
                     shadow_root_selector_type=shadow_root_selector_type,
                     stay_in_context=True,
                 ))
-                helpers.DRIVER.execute_script("arguments[0].click();", el)
+                ctx.driver.execute_script("arguments[0].click();", el)
 
-        helpers._wait_document_ready(timeout=10.0)
+        _wait_document_ready(timeout=10.0)
 
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
+        snapshot = _make_page_snapshot(
+            max_snapshot_chars=max_snapshot_chars,
+            aggressive_cleaning=aggressive_cleaning,
+            offset_chars=offset_chars
+        )
         return json.dumps({
             "ok": True,
             "action": "click",
@@ -122,8 +144,13 @@ async def click_element(
             "selector_type": selector_type,
             "snapshot": snapshot,
         })
+
     except TimeoutException:
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
+        snapshot = _make_page_snapshot(
+            max_snapshot_chars=max_snapshot_chars,
+            aggressive_cleaning=aggressive_cleaning,
+            offset_chars=offset_chars
+        )
         return json.dumps({
             "ok": False,
             "error": "timeout",
@@ -131,14 +158,20 @@ async def click_element(
             "selector_type": selector_type,
             "snapshot": snapshot,
         })
+
     except Exception as e:
-        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
+        diag = collect_diagnostics(driver=ctx.driver, exc=e, config=ctx.config)
+        snapshot = _make_page_snapshot(
+            max_snapshot_chars=max_snapshot_chars,
+            aggressive_cleaning=aggressive_cleaning,
+            offset_chars=offset_chars
+        )
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+
     finally:
         try:
-            if helpers.DRIVER is not None:
-                helpers.DRIVER.switch_to.default_content()
+            if ctx.is_driver_initialized():
+                ctx.driver.switch_to.default_content()
         except Exception:
             pass
 
@@ -161,10 +194,12 @@ async def send_keys(
     Returns:
         JSON string with ok status, action, key sent, and page snapshot
     """
+    ctx = get_context()
+
     try:
         from selenium.webdriver.common.keys import Keys
 
-        if helpers.DRIVER is None:
+        if not ctx.is_driver_initialized():
             return json.dumps({"ok": False, "error": "driver_not_initialized"})
 
         # Map string key names to Selenium Keys
@@ -203,8 +238,8 @@ async def send_keys(
 
         if selector:
             # Send keys to specific element
-            el = helpers.retry_op(op=lambda: helpers.find_element(
-                driver=helpers.DRIVER,
+            el = retry_op(op=lambda: find_element(
+                driver=ctx.driver,
                 selector=selector,
                 selector_type=selector_type,
                 timeout=int(timeout),
@@ -214,10 +249,10 @@ async def send_keys(
         else:
             # Send keys to active element (usually body or focused element)
             from selenium.webdriver.common.action_chains import ActionChains
-            ActionChains(helpers.DRIVER).send_keys(selenium_key).perform()
+            ActionChains(ctx.driver).send_keys(selenium_key).perform()
 
         time.sleep(0.2)  # Brief pause
-        snapshot = helpers._make_page_snapshot()
+        snapshot = _make_page_snapshot()
 
         return json.dumps({
             "ok": True,
@@ -226,9 +261,10 @@ async def send_keys(
             "selector": selector,
             "snapshot": snapshot,
         })
+
     except Exception as e:
-        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
-        snapshot = helpers._make_page_snapshot()
+        diag = collect_diagnostics(driver=ctx.driver, exc=e, config=ctx.config)
+        snapshot = _make_page_snapshot()
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 
 async def wait_for_element(
@@ -253,14 +289,16 @@ async def wait_for_element(
     Returns:
         JSON string with ok status, element found status, and page snapshot
     """
+    ctx = get_context()
+
     try:
-        if helpers.DRIVER is None:
+        if not ctx.is_driver_initialized():
             return json.dumps({"ok": False, "error": "driver_not_initialized"})
 
         visible_only = condition in ("visible", "clickable")
 
-        el = helpers.find_element(
-            driver=helpers.DRIVER,
+        el = find_element(
+            driver=ctx.driver,
             selector=selector,
             selector_type=selector_type,
             timeout=int(timeout),
@@ -270,9 +308,9 @@ async def wait_for_element(
         )
 
         if condition == "clickable":
-            helpers._wait_clickable_element(el=el, driver=helpers.DRIVER, timeout=timeout)
+            _wait_clickable_element(el=el, driver=ctx.driver, timeout=timeout)
 
-        snapshot = helpers._make_page_snapshot()
+        snapshot = _make_page_snapshot()
         return json.dumps({
             "ok": True,
             "action": "wait_for_element",
@@ -282,8 +320,9 @@ async def wait_for_element(
             "snapshot": snapshot,
             "message": f"Element '{selector}' is now {condition}"
         })
+
     except TimeoutException:
-        snapshot = helpers._make_page_snapshot()
+        snapshot = _make_page_snapshot()
         return json.dumps({
             "ok": False,
             "error": "timeout",
@@ -293,14 +332,16 @@ async def wait_for_element(
             "snapshot": snapshot,
             "message": f"Element '{selector}' did not become {condition} within {timeout}s"
         })
+
     except Exception as e:
-        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
-        snapshot = helpers._make_page_snapshot()
+        diag = collect_diagnostics(driver=ctx.driver, exc=e, config=ctx.config)
+        snapshot = _make_page_snapshot()
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+
     finally:
         try:
-            if helpers.DRIVER is not None:
-                helpers.DRIVER.switch_to.default_content()
+            if ctx.is_driver_initialized():
+                ctx.driver.switch_to.default_content()
         except Exception:
             pass
 

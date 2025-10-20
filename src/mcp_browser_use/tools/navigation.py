@@ -3,8 +3,10 @@
 import json
 import time
 from selenium.webdriver.support.ui import WebDriverWait
-import mcp_browser_use.helpers as helpers
-from mcp_browser_use.utils.diagnostics import collect_diagnostics
+from ..context import get_context
+from ..utils.diagnostics import collect_diagnostics
+from ..actions.navigation import _wait_document_ready
+from ..actions.screenshots import _make_page_snapshot
 
 
 async def navigate_to_url(
@@ -12,34 +14,35 @@ async def navigate_to_url(
     wait_for: str = "load",     # "load" or "complete"
     timeout_sec: int = 30,
 ) -> str:
-    """
-    Navigate to a URL and return JSON with a raw snapshot.
-    """
+    """Navigate to a URL and return JSON with a raw snapshot."""
+    ctx = get_context()
+
     try:
-        if helpers.DRIVER is None:
+        if not ctx.is_driver_initialized():
             return json.dumps({"ok": False, "error": "driver_not_initialized"})
 
-        helpers.DRIVER.get(url)
+        ctx.driver.get(url)
 
         # DOM readiness
         try:
-            helpers._wait_document_ready(timeout=min(max(timeout_sec, 0), 60))
+            _wait_document_ready(timeout=min(max(timeout_sec, 0), 60))
         except Exception:
             pass
 
         if (wait_for or "load").lower() == "complete":
             try:
-                WebDriverWait(helpers.DRIVER, timeout_sec).until(
+                WebDriverWait(ctx.driver, timeout_sec).until(
                     lambda d: d.execute_script("return document.readyState") == "complete"
                 )
             except Exception:
                 pass
 
-        snapshot = helpers._make_page_snapshot()
+        snapshot = _make_page_snapshot()
         return json.dumps({"ok": True, "action": "navigate", "url": url, "snapshot": snapshot})
+
     except Exception as e:
-        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
-        snapshot = helpers._make_page_snapshot()
+        diag = collect_diagnostics(driver=ctx.driver, exc=e, config=ctx.config)
+        snapshot = _make_page_snapshot()
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 
 
@@ -57,14 +60,20 @@ async def scroll(x: int, y: int, max_snapshot_chars=0, aggressive_cleaning=False
     Returns:
         JSON string with ok status, action, scroll amounts, and page snapshot
     """
+    ctx = get_context()
+
     try:
-        if helpers.DRIVER is None:
+        if not ctx.is_driver_initialized():
             return json.dumps({"ok": False, "error": "driver_not_initialized"})
 
-        helpers.DRIVER.execute_script(f"window.scrollBy({int(x)}, {int(y)});")
+        ctx.driver.execute_script(f"window.scrollBy({int(x)}, {int(y)});")
         time.sleep(0.3)  # Brief pause to allow scroll to complete
 
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
+        snapshot = _make_page_snapshot(
+            max_snapshot_chars=max_snapshot_chars,
+            aggressive_cleaning=aggressive_cleaning,
+            offset_chars=offset_chars
+        )
         return json.dumps({
             "ok": True,
             "action": "scroll",
@@ -72,9 +81,14 @@ async def scroll(x: int, y: int, max_snapshot_chars=0, aggressive_cleaning=False
             "y": int(y),
             "snapshot": snapshot,
         })
+
     except Exception as e:
-        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
+        diag = collect_diagnostics(driver=ctx.driver, exc=e, config=ctx.config)
+        snapshot = _make_page_snapshot(
+            max_snapshot_chars=max_snapshot_chars,
+            aggressive_cleaning=aggressive_cleaning,
+            offset_chars=offset_chars
+        )
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 
 

@@ -4,8 +4,9 @@ import io
 import json
 import base64
 from typing import Optional
-import mcp_browser_use.helpers as helpers
-from mcp_browser_use.utils.diagnostics import collect_diagnostics
+from ..context import get_context
+from ..utils.diagnostics import collect_diagnostics
+from ..actions.screenshots import _make_page_snapshot
 
 
 async def take_screenshot(screenshot_path, return_base64, return_snapshot, thumbnail_width=None) -> str:
@@ -22,12 +23,14 @@ async def take_screenshot(screenshot_path, return_base64, return_snapshot, thumb
     Returns:
         JSON string with ok status, saved path, optional base64 thumbnail, and snapshot
     """
+    ctx = get_context()
+
     try:
-        if helpers.DRIVER is None:
+        if not ctx.is_driver_initialized():
             return json.dumps({"ok": False, "error": "driver_not_initialized"})
 
         # Get full screenshot
-        png_bytes = helpers.DRIVER.get_screenshot_as_png()
+        png_bytes = ctx.driver.get_screenshot_as_png()
 
         # Save full screenshot to disk if path provided
         if screenshot_path:
@@ -95,15 +98,16 @@ async def take_screenshot(screenshot_path, return_base64, return_snapshot, thumb
                 })
 
         if return_snapshot:
-            payload["snapshot"] = helpers._make_page_snapshot()
+            payload["snapshot"] = _make_page_snapshot()
         else:
             payload["snapshot"] = "Omitted to save tokens."
 
         return json.dumps(payload)
+
     except Exception as e:
-        diag = collect_diagnostics(helpers.DRIVER, e, helpers.get_env_config())
+        diag = collect_diagnostics(ctx.driver, e, ctx.config)
         if return_snapshot:
-            snapshot = helpers._make_page_snapshot()
+            snapshot = _make_page_snapshot()
         else:
             snapshot = "Omitted to save tokens."
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})

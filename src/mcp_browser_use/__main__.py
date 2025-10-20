@@ -225,6 +225,9 @@ from mcp_browser_use.decorators import (
     ensure_driver_ready,
 )
 from mcp_browser_use.helpers_context import to_context_pack as _to_context_pack
+
+# Import tools directly (not via helpers) to break circular dependency
+from mcp_browser_use.tools import browser_management, navigation, interaction, screenshots, debugging
 #endregion
 
 #region Logger
@@ -255,7 +258,7 @@ async def mcp_browser_use__start_browser(
     Returns:
         ContextPack JSON
     """
-    result = await MBU.helpers.start_browser()
+    result = await browser_management.start_browser()
     return await _to_context_pack(
         result_json=result,
         return_mode=return_mode,
@@ -348,7 +351,7 @@ async def mcp_browser_use__navigate_to_url(
           - Search results with many pages loaded via infinite scroll
           - Large data tables with 10,000+ rows
     """
-    result = await MBU.helpers.navigate_to_url(url=url, wait_for=wait_for, timeout_sec=timeout_sec)
+    result = await navigation.navigate_to_url(url=url, wait_for=wait_for, timeout_sec=timeout_sec)
     return await _to_context_pack(
         result_json=result,
         return_mode=return_mode,
@@ -414,7 +417,7 @@ async def mcp_browser_use__fill_text(
         - Use `send_keys` for complex sequences or special keys.
         - For masked inputs or JS-only fields, consider `force_js` variants if available.
     """
-    result = await MBU.helpers.fill_text(
+    result = await interaction.fill_text(
         selector=selector,
         text=text,
         selector_type=selector_type,
@@ -491,7 +494,7 @@ async def mcp_browser_use__click_element(
         - Some sites block native clicks; `force_js=True` can bypass those cases, but
           it may not trigger all browser-level side effects (e.g., focus).
     """
-    result = await MBU.helpers.click_element(
+    result = await interaction.click_element(
         selector=selector,
         selector_type=selector_type,
         timeout=timeout,
@@ -525,7 +528,7 @@ async def mcp_browser_use__take_screenshot(
     text_offset: Optional[int] = None,
     html_offset: Optional[int] = None,
 ) -> str:
-    result = await MBU.helpers.take_screenshot(
+    result = await screenshots.take_screenshot(
         screenshot_path=screenshot_path,
         return_base64=return_base64,
         return_snapshot=return_snapshot,
@@ -577,7 +580,7 @@ async def mcp_browser_use__get_debug_diagnostics_info(
         - Useful for troubleshooting issues such as stale sessions, blocked popups,
           or failed navigation. Avoid exposing sensitive values in logs.
     """
-    diagnostics = await MBU.helpers.get_debug_diagnostics_info()
+    diagnostics = await debugging.get_debug_diagnostics_info()
     return await _to_context_pack(
         result_json=diagnostics,
         return_mode=return_mode,
@@ -586,7 +589,7 @@ async def mcp_browser_use__get_debug_diagnostics_info(
         text_offset=text_offset,
         html_offset=html_offset
     )
-        
+
 @mcp.tool()
 @tool_envelope
 @exclusive_browser_access
@@ -607,7 +610,7 @@ async def mcp_browser_use__debug_element(
     text_offset: Optional[int] = None,
     html_offset: Optional[int] = None,
 ) -> str:
-    result = await MBU.helpers.debug_element(
+    result = await debugging.debug_element(
         selector=selector,
         selector_type=selector_type,
         timeout=timeout,
@@ -633,7 +636,7 @@ async def mcp_browser_use__debug_element(
 @tool_envelope
 @exclusive_browser_access
 async def mcp_browser_use__unlock_browser() -> str:
-    unlock_browser_info = await MBU.helpers.unlock_browser()
+    unlock_browser_info = await browser_management.unlock_browser()
     return unlock_browser_info
 
 @mcp.tool()
@@ -645,7 +648,7 @@ async def mcp_browser_use__close_browser() -> str:
 
     Simply do not use this! It is very bad!
     """
-    close_browser_info = await MBU.helpers.close_browser()
+    close_browser_info = await browser_management.close_browser()
     return close_browser_info
 
 @mcp.tool()
@@ -667,7 +670,7 @@ async def mcp_browser_use__force_close_all_chrome() -> str:
     Returns:
         str: JSON with status, killed process IDs, and any errors encountered
     """
-    return await MBU.helpers.force_close_all_chrome()
+    return await browser_management.force_close_all_chrome()
 #endregion
 
 #region Tools -- Page interaction
@@ -716,7 +719,7 @@ async def mcp_browser_use__scroll(
         - Some sticky headers may cover targets scrolled into view; consider an offset
           if your implementation supports it.
     """
-    result = await MBU.helpers.scroll(x=x, y=y)
+    result = await navigation.scroll(x=x, y=y)
     return await _to_context_pack(
         result_json=result,
         return_mode=return_mode,
@@ -772,7 +775,7 @@ async def mcp_browser_use__send_keys(
     Notes:
         - Combine with `wait_for_element` to ensure predictable post-typing state.
     """
-    result = await MBU.helpers.send_keys(
+    result = await interaction.send_keys(
         key=key,
         selector=selector,
         selector_type=selector_type,
@@ -831,7 +834,7 @@ async def mcp_browser_use__wait_for_element(
         ValueError: If `selector_type` or `return_mode` is invalid.
         RuntimeError: If the browser/driver is not ready.
     """
-    result = await MBU.helpers.wait_for_element(
+    result = await interaction.wait_for_element(
         selector=selector,
         selector_type=selector_type,
         timeout=timeout,

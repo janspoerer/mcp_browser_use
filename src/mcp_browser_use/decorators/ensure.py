@@ -9,9 +9,11 @@ def ensure_driver_ready(_func=None, *, include_snapshot=False, include_diagnosti
             @functools.wraps(fn)
             async def wrapper(*args, **kwargs):
                 import mcp_browser_use.helpers as helpers  # module import, not from-import
+                from mcp_browser_use.config.environment import get_env_config
+                from mcp_browser_use.utils.diagnostics import collect_diagnostics
 
                 # Check if driver is already initialized, but don't auto-initialize
-                if helpers.DRIVER is None:
+                if helpers.get_context().driver is None:
                     payload = {
                         "ok": False, 
                         "error": "browser_not_started",
@@ -21,14 +23,14 @@ def ensure_driver_ready(_func=None, *, include_snapshot=False, include_diagnosti
                         payload["snapshot"] = {"url": None, "title": None, "html": "", "truncated": False}
                     if include_diagnostics:
                         try:
-                            payload["diagnostics"] = helpers.collect_diagnostics(None, None, helpers.get_env_config())
+                            payload["diagnostics"] = collect_diagnostics(None, None, get_env_config())
                         except Exception:
                             pass
                     return json.dumps(payload)
-                
+
                 # Ensure we have a valid window for this driver
                 try:
-                    helpers._ensure_singleton_window(helpers.DRIVER)
+                    helpers._ensure_singleton_window(helpers.get_context().driver)
                 except Exception:
                     payload = {
                         "ok": False,
@@ -45,9 +47,11 @@ def ensure_driver_ready(_func=None, *, include_snapshot=False, include_diagnosti
             @functools.wraps(fn)
             def wrapper(*args, **kwargs):
                 import mcp_browser_use.helpers as helpers  # module import, not from-import
+                from mcp_browser_use.config.environment import get_env_config
+                from mcp_browser_use.utils.diagnostics import collect_diagnostics
 
                 # Check if driver is already initialized, but don't auto-initialize
-                if helpers.DRIVER is None:
+                if helpers.get_context().driver is None:
                     payload = {
                         "ok": False, 
                         "error": "browser_not_started",
@@ -57,14 +61,14 @@ def ensure_driver_ready(_func=None, *, include_snapshot=False, include_diagnosti
                         payload["snapshot"] = {"url": None, "title": None, "html": "", "truncated": False}
                     if include_diagnostics:
                         try:
-                            payload["diagnostics"] = helpers.collect_diagnostics(None, None, helpers.get_env_config())
+                            payload["diagnostics"] = collect_diagnostics(None, None, get_env_config())
                         except Exception:
                             pass
                     return json.dumps(payload)
-                
+
                 # Ensure we have a valid window for this driver
                 try:
-                    helpers._ensure_singleton_window(helpers.DRIVER)
+                    helpers._ensure_singleton_window(helpers.get_context().driver)
                 except Exception:
                     payload = {
                         "ok": False,

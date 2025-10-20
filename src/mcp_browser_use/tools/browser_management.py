@@ -3,43 +3,74 @@
 import json
 import psutil
 from pathlib import Path
-import mcp_browser_use.helpers as helpers
-from mcp_browser_use.utils.diagnostics import collect_diagnostics
+from ..context import get_context, reset_context
+from ..config import get_env_config, profile_key
+from ..constants import ACTION_LOCK_TTL_SECS
+from ..utils.diagnostics import collect_diagnostics
+
+# Import specific functions we need
+from ..browser.driver import (
+    _ensure_driver_and_window,
+    close_singleton_window,
+    _close_extra_blank_windows_safe,
+)
+from ..browser.process import ensure_process_tag
+from ..actions.navigation import _wait_document_ready
+from ..actions.screenshots import _make_page_snapshot
+from ..locking.action_lock import _release_action_lock
 
 
 async def start_browser():
-    owner = helpers.ensure_process_tag()
-    try:
-        helpers._ensure_driver_and_window()
+    """
+    Start browser session or open new window in existing session.
 
-        if helpers.DRIVER is None:
-            diag = collect_diagnostics(None, None, helpers.get_env_config())
+    Returns:
+        JSON string with session info and snapshot
+    """
+    ctx = get_context()
+
+    # Ensure process tag
+    if ctx.process_tag is None:
+        ctx.process_tag = ensure_process_tag()
+
+    owner = ctx.process_tag
+
+    try:
+        # Initialize driver and window
+        _ensure_driver_and_window()
+
+        # Check if initialization succeeded
+        if not ctx.is_driver_initialized():
+            diag = collect_diagnostics(None, None, ctx.config)
             if isinstance(diag, str):
-                    diag = {"summary": diag}
+                diag = {"summary": diag}
+
             return json.dumps({
                 "ok": False,
                 "error": "driver_not_initialized",
                 "driver_initialized": False,
-                "debugger": (
-                    f"{helpers.DEBUGGER_HOST}:{helpers.DEBUGGER_PORT}"
-                    if (helpers.DEBUGGER_HOST and helpers.DEBUGGER_PORT) else None
-                ),
+                "debugger": ctx.get_debugger_address(),
                 "diagnostics": diag,
                 "message": "Failed to attach/launch a debuggable Chrome session."
             })
 
-        handle = getattr(helpers.DRIVER, "current_window_handle", None)
+        # Clean up extra blank windows
+        handle = getattr(ctx.driver, "current_window_handle", None)
         try:
-            helpers._close_extra_blank_windows_safe(helpers.DRIVER, exclude_handles={handle} if handle else None)
+            _close_extra_blank_windows_safe(
+                ctx.driver,
+                exclude_handles={handle} if handle else None
+            )
         except Exception:
             pass
 
-        # Wait until the page is ready. Get a snapshot.
-        helpers._wait_document_ready(timeout=5.0)
+        # Wait for page ready and get snapshot
+        _wait_document_ready(timeout=5.0)
         try:
-            snapshot = helpers._make_page_snapshot()
+            snapshot = _make_page_snapshot()
         except Exception:
             snapshot = None
+
         snapshot = snapshot or {
             "url": "about:blank",
             "title": "",
@@ -47,7 +78,7 @@ async def start_browser():
             "truncated": False,
         }
 
-        msg = ( # Human-friendly message
+        msg = (
             f"Browser session created successfully. "
             f"Session ID: {owner}. "
             f"Current URL: {snapshot.get('url') or 'about:blank'}"
@@ -56,67 +87,96 @@ async def start_browser():
         payload = {
             "ok": True,
             "session_id": owner,
-            "debugger": f"{helpers.DEBUGGER_HOST}:{helpers.DEBUGGER_PORT}" if (helpers.DEBUGGER_HOST and helpers.DEBUGGER_PORT) else None,
-            "lock_ttl_seconds": helpers.ACTION_LOCK_TTL_SECS,
+            "debugger": ctx.get_debugger_address(),
+            "lock_ttl_seconds": ACTION_LOCK_TTL_SECS,
             "snapshot": snapshot,
             "message": msg,
         }
 
         return json.dumps(payload)
+
     except Exception as e:
-        diag = collect_diagnostics(helpers.DRIVER, e, helpers.get_env_config())
-        snapshot = helpers._make_page_snapshot() or {
+        diag = collect_diagnostics(ctx.driver, e, ctx.config)
+        snapshot = _make_page_snapshot() or {
             "url": "about:blank",
             "title": "",
             "html": "",
             "truncated": False,
         }
-        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
+        return json.dumps({
+            "ok": False,
+            "error": str(e),
+            "diagnostics": diag,
+            "snapshot": snapshot
+        })
 
 
 async def unlock_browser():
-    owner = helpers.ensure_process_tag()
-    released = helpers._release_action_lock(owner)
-    return json.dumps({"ok": True, "released": bool(released)})
+    """Release the action lock for this process."""
+    ctx = get_context()
+
+    if ctx.process_tag is None:
+        ctx.process_tag = ensure_process_tag()
+
+    owner = ctx.process_tag
+    released = _release_action_lock(owner)
+
+    return json.dumps({
+        "ok": True,
+        "released": bool(released)
+    })
 
 async def close_browser() -> str:
+    """Close the browser window for this session."""
+    ctx = get_context()
+
     try:
-        closed = helpers.close_singleton_window()
+        closed = close_singleton_window()
         msg = "Browser window closed successfully" if closed else "No window to close"
-        return json.dumps({"ok": True, "closed": bool(closed), "message": msg})
+
+        return json.dumps({
+            "ok": True,
+            "closed": bool(closed),
+            "message": msg
+        })
+
     except Exception as e:
-        diag = collect_diagnostics(helpers.DRIVER, e, helpers.get_env_config())
-        return json.dumps({"ok": False, "error": str(e), "diagnostics": diag})
+        diag = collect_diagnostics(ctx.driver, e, ctx.config)
+        return json.dumps({
+            "ok": False,
+            "error": str(e),
+            "diagnostics": diag
+        })
 
 async def force_close_all_chrome() -> str:
     """
     Force close all Chrome processes, quit driver, and clean up all state.
-    Use this to recover from stuck Chrome instances or when normal close_browser fails.
+    Use this to recover from stuck Chrome instances.
     """
-    # Note: Cannot use global statement with module attributes, so we access helpers.DRIVER directly
-
+    ctx = get_context()
     killed_processes = []
     errors = []
 
     try:
         # 1. Try to quit the Selenium driver gracefully
-        if helpers.DRIVER is not None:
+        if ctx.driver is not None:
             try:
-                helpers.DRIVER.quit()
+                ctx.driver.quit()
             except Exception as e:
                 errors.append(f"Driver quit failed: {e}")
-            helpers.DRIVER = None
+
+            ctx.driver = None
 
         # 2. Get config to find which Chrome processes to kill
-        try:
-            cfg = helpers.get_env_config()
-            user_data_dir = cfg.get("user_data_dir", "")
-        except Exception as e:
-            user_data_dir = ""
-            errors.append(f"Could not get config: {e}")
+        user_data_dir = ctx.config.get("user_data_dir", "")
+        if not user_data_dir:
+            try:
+                cfg = get_env_config()
+                user_data_dir = cfg.get("user_data_dir", "")
+            except Exception as e:
+                errors.append(f"Could not get config: {e}")
 
         # 3. Kill all Chrome processes using the MCP profile
-        # First, try targeted kill based on user_data_dir
         chrome_processes_found = []
         for p in psutil.process_iter(["name", "cmdline", "pid"]):
             try:
@@ -124,14 +184,13 @@ async def force_close_all_chrome() -> str:
                     continue
                 if "chrome" not in p.info["name"].lower():
                     continue
+
                 chrome_processes_found.append(p)
 
                 # If we have a user_data_dir, check if this process matches
                 if user_data_dir:
                     cmd = p.info.get("cmdline")
                     if cmd:
-                        # Check if any argument contains our user_data_dir path
-                        # Use 'in' check because paths might have different separators or be normalized differently
                         user_data_normalized = user_data_dir.replace("\\", "/").lower()
                         for arg in cmd:
                             if arg and "--user-data-dir" in arg:
@@ -143,8 +202,7 @@ async def force_close_all_chrome() -> str:
             except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
                 errors.append(f"Could not access process: {e}")
 
-        # 4. Fallback: If no Chrome processes were killed but some were found, kill them all
-        # This ensures we don't leave zombie Chrome processes
+        # 4. Fallback: If no processes killed but some found, kill them all
         if not killed_processes and chrome_processes_found:
             for p in chrome_processes_found:
                 try:
@@ -153,26 +211,24 @@ async def force_close_all_chrome() -> str:
                 except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
                     errors.append(f"Could not kill process in fallback: {e}")
 
-        # 5. Clean up global state
-        helpers.DEBUGGER_HOST = None
-        helpers.DEBUGGER_PORT = None
-        helpers.TARGET_ID = None
-        helpers.WINDOW_ID = None
+        # 5. Clean up context state
+        ctx.debugger_host = None
+        ctx.debugger_port = None
+        ctx.reset_window_state()
 
         # 6. Release locks
         try:
-            if helpers.MY_TAG:
-                helpers._release_action_lock(helpers.MY_TAG)
+            if ctx.process_tag:
+                _release_action_lock(ctx.process_tag)
         except Exception as e:
             errors.append(f"Lock release failed: {e}")
 
         # 7. Clean up lock files
         try:
             if user_data_dir:
-                lock_dir = Path(helpers.LOCK_DIR)
-                # lock_dir = Path(tempfile.gettempdir()) / "mcp_browser_locks"
+                lock_dir = Path(ctx.lock_dir)
                 if lock_dir.exists():
-                    profile_key_val = helpers.profile_key(cfg) if cfg else ""
+                    profile_key_val = profile_key(ctx.config) if ctx.config else ""
                     for lock_file in lock_dir.glob(f"*{profile_key_val}*"):
                         try:
                             lock_file.unlink()

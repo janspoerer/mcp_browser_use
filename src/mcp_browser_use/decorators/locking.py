@@ -50,7 +50,7 @@ def _validate_config_or_error():
     Returns None if valid, or JSON error string if invalid.
     """
     try:
-        from mcp_browser_use.helpers import get_env_config
+        from mcp_browser_use.config.environment import get_env_config
         get_env_config()  # Just validate - don't store since config never changes
         return None  # Valid config
     except Exception as e:
@@ -83,14 +83,15 @@ def exclusive_browser_access(_func=None):
                     return config_error
 
                 # Import lazily to avoid cycles at module import time
-                from mcp_browser_use.helpers import (
+                from mcp_browser_use.constants import ACTION_LOCK_TTL_SECS
+                from mcp_browser_use.locking.action_lock import (
                     get_intra_process_lock,
-                    ensure_process_tag,
                     _acquire_action_lock_or_error,
                     _renew_action_lock,
-                    ACTION_LOCK_TTL_SECS,
                 )
+                from mcp_browser_use.browser.process import ensure_process_tag
 
+                # Ensure process tag exists
                 owner = ensure_process_tag()
 
                 # In-process serialization across tools
@@ -139,14 +140,14 @@ def exclusive_browser_access(_func=None):
             if config_error:
                 return config_error
 
-            from mcp_browser_use.helpers import (
-                ensure_process_tag,
+            from mcp_browser_use.constants import ACTION_LOCK_TTL_SECS
+            from mcp_browser_use.locking.action_lock import (
                 _acquire_action_lock_or_error,
                 _renew_action_lock,
-                ACTION_LOCK_TTL_SECS,
             )
+            from mcp_browser_use.browser.process import ensure_process_tag
 
-
+            # Ensure process tag exists
             owner = ensure_process_tag()
 
 

@@ -4,10 +4,17 @@ import time
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+from ..context import get_context
+
 
 def _wait_document_ready(timeout: float = 10.0):
+    """Wait for document to be ready."""
+    ctx = get_context()
+    if not ctx.driver:
+        return
+
     try:
-        WebDriverWait(DRIVER, timeout).until(
+        WebDriverWait(ctx.driver, timeout).until(
             lambda d: d.execute_script("return document.readyState") in ("interactive", "complete")
         )
     except Exception:
@@ -15,15 +22,13 @@ def _wait_document_ready(timeout: float = 10.0):
         pass
 
 
-
-
 def navigate_to_url(url: str) -> dict:
-    """Navigate to URL (placeholder - needs driver context)"""
-    from ..helpers import DRIVER
-    if not DRIVER:
+    """Navigate to URL."""
+    ctx = get_context()
+    if not ctx.driver:
         return {"ok": False, "error": "No driver available"}
     try:
-        DRIVER.get(url)
+        ctx.driver.get(url)
         _wait_document_ready()
         return {"ok": True}
     except Exception as e:
@@ -31,13 +36,13 @@ def navigate_to_url(url: str) -> dict:
 
 
 def wait_for_element(selector: str, timeout: float = 10.0) -> dict:
-    """Wait for element to appear (placeholder)"""
-    from ..helpers import DRIVER
-    if not DRIVER:
+    """Wait for element to appear."""
+    ctx = get_context()
+    if not ctx.driver:
         return {"ok": False, "error": "No driver available"}
     try:
         from selenium.webdriver.common.by import By
-        WebDriverWait(DRIVER, timeout).until(
+        WebDriverWait(ctx.driver, timeout).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, selector))
         )
         return {"ok": True}
@@ -46,15 +51,15 @@ def wait_for_element(selector: str, timeout: float = 10.0) -> dict:
 
 
 def get_current_page_meta() -> dict:
-    """Get current page metadata"""
-    from ..helpers import DRIVER
-    if not DRIVER:
+    """Get current page metadata."""
+    ctx = get_context()
+    if not ctx.driver:
         return {"ok": False, "error": "No driver available"}
     try:
         return {
             "ok": True,
-            "url": DRIVER.current_url,
-            "title": DRIVER.title,
+            "url": ctx.driver.current_url,
+            "title": ctx.driver.title,
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}

@@ -1,8 +1,12 @@
 """Screenshot and page snapshot functionality."""
 
+import os
+import time
 import io
 import base64
 from typing import Optional
+
+from ..context import get_context
 
 
 def _make_page_snapshot(
@@ -14,21 +18,24 @@ def _make_page_snapshot(
     Capture the raw page snapshot (no cleaning, no truncation).
     Returns a dict: {"url": str|None, "title": str|None, "html": str}
     """
+    from .navigation import _wait_document_ready
+
+    ctx = get_context()
     url = None
     title = None
     html = ""
     try:
-        if DRIVER is not None:
+        if ctx.driver is not None:
             try:
-                DRIVER.switch_to.default_content()
+                ctx.driver.switch_to.default_content()
             except Exception:
                 pass
             try:
-                url = DRIVER.current_url
+                url = ctx.driver.current_url
             except Exception:
                 url = None
             try:
-                title = DRIVER.title
+                title = ctx.driver.title
             except Exception:
                 title = None
 
@@ -46,33 +53,30 @@ def _make_page_snapshot(
 
             # Prefer outerHTML; fall back to page_source
             try:
-                html = DRIVER.execute_script("return document.documentElement.outerHTML") or ""
+                html = ctx.driver.execute_script("return document.documentElement.outerHTML") or ""
                 if not html:
-                    html = DRIVER.page_source or ""
+                    html = ctx.driver.page_source or ""
             except Exception:
                 try:
-                    html = DRIVER.page_source or ""
+                    html = ctx.driver.page_source or ""
                 except Exception:
                     html = ""
     except Exception:
         pass
     return {"url": url, "title": title, "html": html}
-#endregion
-
-#region Tool helpers (clickable wait using a lambda on the element)
 
 
 def take_screenshot(filename: Optional[str] = None) -> dict:
-    """Take a screenshot (placeholder)"""
-    from ..helpers import DRIVER
-    if not DRIVER:
+    """Take a screenshot."""
+    ctx = get_context()
+    if not ctx.driver:
         return {"ok": False, "error": "No driver available"}
     try:
         if filename:
-            DRIVER.save_screenshot(filename)
+            ctx.driver.save_screenshot(filename)
             return {"ok": True, "path": filename}
         else:
-            png_data = DRIVER.get_screenshot_as_png()
+            png_data = ctx.driver.get_screenshot_as_png()
             b64 = base64.b64encode(png_data).decode('utf-8')
             return {"ok": True, "data": b64}
     except Exception as e:

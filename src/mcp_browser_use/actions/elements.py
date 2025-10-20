@@ -12,6 +12,8 @@ from selenium.common.exceptions import (
     ElementClickInterceptedException,
 )
 
+from ..context import get_context
+
 
 def _wait_clickable_element(el, driver, timeout: float = 10.0):
     """Wait for an element to be clickable (displayed and enabled)."""
@@ -111,12 +113,12 @@ def find_element(
 
 
 def click_element(selector: str, selector_type: str = "css") -> dict:
-    """Click an element (placeholder)"""
-    from ..helpers import DRIVER
-    if not DRIVER:
+    """Click an element."""
+    ctx = get_context()
+    if not ctx.driver:
         return {"ok": False, "error": "No driver available"}
     try:
-        el = find_element(driver=DRIVER, selector=selector, selector_type=selector_type, timeout=10.0)
+        el = find_element(driver=ctx.driver, selector=selector, selector_type=selector_type, timeout=10.0)
         if not el:
             return {"ok": False, "error": "Element not found"}
         el.click()
@@ -126,12 +128,12 @@ def click_element(selector: str, selector_type: str = "css") -> dict:
 
 
 def fill_text(selector: str, text: str, selector_type: str = "css") -> dict:
-    """Fill text into an element (placeholder)"""
-    from ..helpers import DRIVER
-    if not DRIVER:
+    """Fill text into an element."""
+    ctx = get_context()
+    if not ctx.driver:
         return {"ok": False, "error": "No driver available"}
     try:
-        el = find_element(driver=DRIVER, selector=selector, selector_type=selector_type, timeout=10.0)
+        el = find_element(driver=ctx.driver, selector=selector, selector_type=selector_type, timeout=10.0)
         if not el:
             return {"ok": False, "error": "Element not found"}
         el.clear()
@@ -142,12 +144,12 @@ def fill_text(selector: str, text: str, selector_type: str = "css") -> dict:
 
 
 def debug_element(selector: str, selector_type: str = "css") -> dict:
-    """Debug element information"""
-    from ..helpers import DRIVER
-    if not DRIVER:
+    """Debug element information."""
+    ctx = get_context()
+    if not ctx.driver:
         return {"ok": False, "error": "No driver available"}
     try:
-        el = find_element(driver=DRIVER, selector=selector, selector_type=selector_type, timeout=5.0)
+        el = find_element(driver=ctx.driver, selector=selector, selector_type=selector_type, timeout=5.0)
         if not el:
             return {"ok": False, "error": "Element not found"}
         return {

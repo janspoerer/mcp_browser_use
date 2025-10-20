@@ -26,9 +26,6 @@ async def fill_text(
     iframe_selector_type,
     shadow_root_selector,
     shadow_root_selector_type,
-    max_snapshot_chars=5000,
-    aggressive_cleaning=False,
-    offset_chars=0,
 ):
     """Fill text into an element."""
     ctx = get_context()
@@ -55,20 +52,12 @@ async def fill_text(
         el.send_keys(text)
         _wait_document_ready(timeout=5.0)
 
-        snapshot = _make_page_snapshot(
-            max_snapshot_chars=max_snapshot_chars,
-            aggressive_cleaning=aggressive_cleaning,
-            offset_chars=offset_chars
-        )
+        snapshot = _make_page_snapshot()
         return json.dumps({"ok": True, "action": "fill_text", "selector": selector, "snapshot": snapshot})
 
     except Exception as e:
         diag = collect_diagnostics(driver=ctx.driver, exc=e, config=ctx.config)
-        snapshot = _make_page_snapshot(
-            max_snapshot_chars=max_snapshot_chars,
-            aggressive_cleaning=aggressive_cleaning,
-            offset_chars=offset_chars
-        )
+        snapshot = _make_page_snapshot()
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 
     finally:
@@ -87,9 +76,6 @@ async def click_element(
     iframe_selector_type,
     shadow_root_selector,
     shadow_root_selector_type,
-    max_snapshot_chars=5000,
-    aggressive_cleaning=False,
-    offset_chars=0,
 ) -> str:
     """Click an element."""
     ctx = get_context()
@@ -132,11 +118,7 @@ async def click_element(
 
         _wait_document_ready(timeout=10.0)
 
-        snapshot = _make_page_snapshot(
-            max_snapshot_chars=max_snapshot_chars,
-            aggressive_cleaning=aggressive_cleaning,
-            offset_chars=offset_chars
-        )
+        snapshot = _make_page_snapshot()
         return json.dumps({
             "ok": True,
             "action": "click",
@@ -146,11 +128,7 @@ async def click_element(
         })
 
     except TimeoutException:
-        snapshot = _make_page_snapshot(
-            max_snapshot_chars=max_snapshot_chars,
-            aggressive_cleaning=aggressive_cleaning,
-            offset_chars=offset_chars
-        )
+        snapshot = _make_page_snapshot()
         return json.dumps({
             "ok": False,
             "error": "timeout",
@@ -161,11 +139,7 @@ async def click_element(
 
     except Exception as e:
         diag = collect_diagnostics(driver=ctx.driver, exc=e, config=ctx.config)
-        snapshot = _make_page_snapshot(
-            max_snapshot_chars=max_snapshot_chars,
-            aggressive_cleaning=aggressive_cleaning,
-            offset_chars=offset_chars
-        )
+        snapshot = _make_page_snapshot()
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 
     finally:

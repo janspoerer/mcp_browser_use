@@ -209,6 +209,7 @@ from .browser.process import (
     _is_port_open,
     get_free_port,
     make_process_tag,
+    ensure_process_tag,
     _read_json,
     read_rendezvous,
     write_rendezvous,
@@ -248,7 +249,6 @@ from .browser.driver import (
     _close_extra_blank_windows_safe,
     get_chromedriver_capability_version,
     _validate_window_context,
-    ensure_process_tag,
 )
 
 # Import and re-export from actions modules

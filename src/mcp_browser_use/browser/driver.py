@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Import context for state management
 from ..context import get_context
 from .devtools import _ensure_debugger_ready, _handle_for_target
-from .process import make_process_tag, chromedriver_log_path
+from .process import make_process_tag, ensure_process_tag, chromedriver_log_path
 from ..locking.window_registry import (
     cleanup_orphaned_windows,
     _register_window,
@@ -42,16 +42,6 @@ def _ensure_driver() -> None:
         ctx.debugger_port,
         ctx.config
     )
-
-
-def ensure_process_tag() -> str:
-    """Get or create process tag in context."""
-    ctx = get_context()
-
-    if ctx.process_tag is None:
-        ctx.process_tag = make_process_tag()
-
-    return ctx.process_tag
 
 
 def _validate_window_context(driver: webdriver.Chrome, expected_target_id: str) -> bool:

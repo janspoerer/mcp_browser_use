@@ -34,6 +34,23 @@ def make_process_tag() -> str:
     return f"agent:{uuid.uuid4().hex}"
 
 
+def ensure_process_tag() -> str:
+    """
+    Get or create the process tag for this session.
+
+    Uses the context to store the tag persistently across the session.
+
+    Returns:
+        The process tag string
+    """
+    from ..context import get_context
+
+    ctx = get_context()
+    if ctx.process_tag is None:
+        ctx.process_tag = make_process_tag()
+    return ctx.process_tag
+
+
 def _read_json(path: str) -> Optional[dict]:
     """Read JSON file, return None on error."""
     try:

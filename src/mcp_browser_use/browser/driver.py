@@ -2,6 +2,8 @@
 
 import os
 import time
+import shutil
+import subprocess
 from typing import Optional
 from selenium import webdriver
 from selenium.common.exceptions import (
@@ -12,31 +14,44 @@ from selenium.common.exceptions import (
 import logging
 logger = logging.getLogger(__name__)
 
-# Global driver state
-_global_driver: Optional[webdriver.Chrome] = None
-_global_target_id: Optional[str] = None
-_global_window_id: Optional[int] = None
+# Import context for state management
+from ..context import get_context
+from .devtools import _ensure_debugger_ready, _handle_for_target
+from .process import make_process_tag, chromedriver_log_path
+from ..locking.window_registry import (
+    cleanup_orphaned_windows,
+    _register_window,
+    _unregister_window,
+)
 
 
 def _ensure_driver() -> None:
     """Attach Selenium to the debuggable Chrome instance (headed by default)."""
-    global DRIVER
-    if DRIVER is not None:
+    ctx = get_context()
+
+    if ctx.driver is not None:
         return
 
-    cfg = get_env_config()
-    _ensure_debugger_ready(cfg)  # allow full wait (e.g., 30s via env)
-    if not (DEBUGGER_HOST and DEBUGGER_PORT):
-        return  # caller will return driver_not_initialized
+    _ensure_debugger_ready(ctx.config)
 
-    # Use the shared factory so Chromedriver logs and options are consistent
-    DRIVER = create_webdriver(DEBUGGER_HOST, DEBUGGER_PORT, cfg)
+    if not (ctx.debugger_host and ctx.debugger_port):
+        return
+
+    ctx.driver = create_webdriver(
+        ctx.debugger_host,
+        ctx.debugger_port,
+        ctx.config
+    )
+
 
 def ensure_process_tag() -> str:
-    global MY_TAG
-    if MY_TAG is None:
-        MY_TAG = make_process_tag()
-    return MY_TAG
+    """Get or create process tag in context."""
+    ctx = get_context()
+
+    if ctx.process_tag is None:
+        ctx.process_tag = make_process_tag()
+
+    return ctx.process_tag
 
 
 def _validate_window_context(driver: webdriver.Chrome, expected_target_id: str) -> bool:
@@ -47,13 +62,13 @@ def _validate_window_context(driver: webdriver.Chrome, expected_target_id: str) 
     """
     if not expected_target_id:
         return False
-    
+
     try:
         # Check if current window handle exists and matches expected target
         current_handle = driver.current_window_handle
         if current_handle and current_handle.endswith(expected_target_id):
             return True
-            
+
         # Double-check by getting target info via CDP
         try:
             info = driver.execute_cdp_cmd("Target.getTargetInfo", {}) or {}
@@ -61,7 +76,7 @@ def _validate_window_context(driver: webdriver.Chrome, expected_target_id: str) 
             return current_target == expected_target_id
         except Exception:
             pass
-            
+
         return False
     except Exception:
         # NoSuchWindowException or other window-related exceptions
@@ -69,105 +84,112 @@ def _validate_window_context(driver: webdriver.Chrome, expected_target_id: str) 
 
 
 def _ensure_singleton_window(driver: webdriver.Chrome):
-    global TARGET_ID, WINDOW_ID
+    """Ensure we have a singleton window for this process."""
+    ctx = get_context()
 
-    # 0) If we already have a target, validate context and attempt recovery
-    if TARGET_ID:
-        # First validate we're in the correct window context
-        if _validate_window_context(driver, TARGET_ID):
-            return  # Already in correct window
+    # 0) If we already have a target, validate context
+    if ctx.target_id:
+        if _validate_window_context(driver, ctx.target_id):
+            return
 
         # Context validation failed - attempt recovery
-        h = _handle_for_target(driver, TARGET_ID)
+        h = _handle_for_target(driver, ctx.target_id)
         if h:
             try:
                 driver.switch_to.window(h)
-                # Verify recovery succeeded
-                if _validate_window_context(driver, TARGET_ID):
+                if _validate_window_context(driver, ctx.target_id):
                     return
             except Exception:
-                pass  # Recovery failed, will recreate window below
+                pass
 
-        # Window handle not found or recovery failed - clear target and recreate
-        TARGET_ID = None
-        WINDOW_ID = None
+        # Recovery failed - clear target and recreate
+        ctx.reset_window_state()
 
-    # 1) First-time in this process or recovery failed: create a new real OS window for this agent
-    if not TARGET_ID:
-        # Cleanup orphaned windows from dead/stale processes before creating new window
+    # 1) Create new window if we don't have a target
+    if not ctx.target_id:
+        # Cleanup orphaned windows
         try:
             cleanup_orphaned_windows(driver)
         except Exception as e:
             logger.debug(f"Window cleanup failed (non-critical): {e}")
+
         try:
             win = driver.execute_cdp_cmd("Browser.createWindow", {"state": "normal"})
             if not isinstance(win, dict):
                 raise RuntimeError(f"Browser.createWindow returned {win!r}")
-            WINDOW_ID = win.get("windowId")
-            TARGET_ID = win.get("targetId")
 
-            if not TARGET_ID:
-                # Fallback: ensure there is a page target tied to a new window
+            ctx.window_id = win.get("windowId")
+            ctx.target_id = win.get("targetId")
+
+            if not ctx.target_id:
+                # Fallback
                 t = driver.execute_cdp_cmd("Target.createTarget", {"url": "about:blank", "newWindow": True})
                 if not isinstance(t, dict) or "targetId" not in t:
                     raise RuntimeError(f"Target.createTarget returned {t!r}")
-                TARGET_ID = t["targetId"]
-                if not WINDOW_ID:
+
+                ctx.target_id = t["targetId"]
+
+                if not ctx.window_id:
                     try:
-                        w = driver.execute_cdp_cmd("Browser.getWindowForTarget", {"targetId": TARGET_ID}) or {}
-                        WINDOW_ID = w.get("windowId")
+                        w = driver.execute_cdp_cmd("Browser.getWindowForTarget", {"targetId": ctx.target_id}) or {}
+                        ctx.window_id = w.get("windowId")
                     except Exception:
-                        WINDOW_ID = None
+                        ctx.window_id = None
         except Exception:
-            # Last resort: create via Target API
+            # Last resort
             t = driver.execute_cdp_cmd("Target.createTarget", {"url": "about:blank", "newWindow": True})
             if not isinstance(t, dict) or "targetId" not in t:
                 raise RuntimeError(f"Target.createTarget returned {t!r}")
-            TARGET_ID = t["targetId"]
-            try:
-                w = driver.execute_cdp_cmd("Browser.getWindowForTarget", {"targetId": TARGET_ID}) or {}
-                WINDOW_ID = w.get("windowId")
-            except Exception:
-                WINDOW_ID = None
 
-    # 2) Map targetId -> Selenium handle (with brief retry)
-    h = _handle_for_target(driver, TARGET_ID)
+            ctx.target_id = t["targetId"]
+            try:
+                w = driver.execute_cdp_cmd("Browser.getWindowForTarget", {"targetId": ctx.target_id}) or {}
+                ctx.window_id = w.get("windowId")
+            except Exception:
+                ctx.window_id = None
+
+    # 2) Map targetId -> Selenium handle
+    h = _handle_for_target(driver, ctx.target_id)
     if not h:
-        for _ in range(20):  # ~1s
+        for _ in range(20):
             time.sleep(0.05)
-            h = _handle_for_target(driver, TARGET_ID)
+            h = _handle_for_target(driver, ctx.target_id)
             if h:
                 break
-    
+
     if h:
         driver.switch_to.window(h)
-        # Final validation to ensure we're in the correct window
-        if not _validate_window_context(driver, TARGET_ID):
-            raise RuntimeError(f"Failed to establish correct window context for target {TARGET_ID}")
 
-        # Register this window in the registry
+        if not _validate_window_context(driver, ctx.target_id):
+            raise RuntimeError(f"Failed to establish correct window context for target {ctx.target_id}")
+
+        # Register window
         try:
             owner = ensure_process_tag()
-            _register_window(owner, TARGET_ID, WINDOW_ID)
+            _register_window(owner, ctx.target_id, ctx.window_id)
         except Exception as e:
             logger.debug(f"Window registration failed (non-critical): {e}")
     else:
-        raise RuntimeError(f"Failed to find window handle for target {TARGET_ID}")
+        raise RuntimeError(f"Failed to find window handle for target {ctx.target_id}")
 
 
 def _ensure_driver_and_window() -> None:
-    global DRIVER, TARGET_ID
+    """Ensure both driver and window are ready."""
     _ensure_driver()
-    if DRIVER is None:
-        return
-    _ensure_singleton_window(DRIVER)
 
+    ctx = get_context()
+    if ctx.driver is None:
+        return
+
+    _ensure_singleton_window(ctx.driver)
 
 
 def _close_extra_blank_windows_safe(driver, exclude_handles=None) -> int:
+    """Close extra blank windows, only within our own OS window."""
     exclude = set(exclude_handles or ())
-    # Only operate within our own OS window
-    own_window_id = WINDOW_ID
+
+    ctx = get_context()
+    own_window_id = ctx.window_id
     if own_window_id is None:
         return 0
 
@@ -210,31 +232,28 @@ def _close_extra_blank_windows_safe(driver, exclude_handles=None) -> int:
 
 
 def close_singleton_window() -> bool:
-    """
-    Close the singleton window (by targetId) without quitting Chrome.
-    Resets TARGET_ID/WINDOW_ID so a subsequent start will create a new window.
-    Also unregisters the window from the registry.
-    """
-    global DRIVER, TARGET_ID, WINDOW_ID
-    if DRIVER is None or not TARGET_ID:
+    """Close the singleton window without quitting Chrome."""
+    ctx = get_context()
+
+    if ctx.driver is None or not ctx.target_id:
         return False
 
     closed = False
     try:
-        DRIVER.execute_cdp_cmd("Target.closeTarget", {"targetId": TARGET_ID})
+        ctx.driver.execute_cdp_cmd("Target.closeTarget", {"targetId": ctx.target_id})
         closed = True
     except Exception:
-        # Fallback: find Selenium handle for this target and close it
+        # Fallback
         try:
-            h = _handle_for_target(DRIVER, TARGET_ID)
+            h = _handle_for_target(ctx.driver, ctx.target_id)
             if h:
-                DRIVER.switch_to.window(h)
-                DRIVER.close()
+                ctx.driver.switch_to.window(h)
+                ctx.driver.close()
                 closed = True
         except Exception:
             pass
 
-    # Unregister from window registry
+    # Unregister window
     if closed:
         try:
             owner = ensure_process_tag()
@@ -242,8 +261,7 @@ def close_singleton_window() -> bool:
         except Exception as e:
             logger.debug(f"Window unregistration failed (non-critical): {e}")
 
-    TARGET_ID = None
-    WINDOW_ID = None
+    ctx.reset_window_state()
     return closed
 
 
@@ -266,9 +284,7 @@ def create_webdriver(debugger_host: str, debugger_port: int, config: dict) -> we
 
     driver = webdriver.Chrome(service=service, options=options)
     return driver
-#endregion
 
-#region Per-process window ownership
 
 def _cleanup_own_blank_tabs(driver):
     handle = getattr(driver, "current_window_handle", None)
@@ -279,9 +295,7 @@ def _cleanup_own_blank_tabs(driver):
         )
     except Exception:
         pass
-#endregion
 
-#region Resilience: retries and DOM utils
 
 def get_chromedriver_capability_version(driver: Optional[webdriver.Chrome] = None) -> Optional[str]:
     """
@@ -304,7 +318,6 @@ def get_chromedriver_capability_version(driver: Optional[webdriver.Chrome] = Non
     return None
 
 
-
 __all__ = [
     'create_webdriver',
     '_ensure_driver',
@@ -315,4 +328,5 @@ __all__ = [
     '_close_extra_blank_windows_safe',
     'get_chromedriver_capability_version',
     '_validate_window_context',
+    'ensure_process_tag',
 ]

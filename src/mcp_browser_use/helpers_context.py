@@ -1,6 +1,7 @@
 # mcp_browser_use/helpers_context.py
 import os
 import time
+import json as _json
 from typing import Optional
 from selenium.webdriver.support.ui import WebDriverWait
 from .context_pack import ContextPack, ReturnMode
@@ -166,3 +167,77 @@ def pack_from_snapshot_dict(
         text_offset=text_offset,
         html_offset=html_offset,
     )
+
+
+async def to_context_pack(result_json: str, return_mode: str, cleaning_level: int, token_budget=1000, text_offset: Optional[int] = None, html_offset: Optional[int] = None) -> str:
+    """
+    Convert a helper's raw JSON result into a JSON-serialized ContextPack envelope.
+
+    Parses a helper response (typically including a "snapshot" dict and auxiliary fields),
+    normalizes `return_mode`, fetches current page metadata, and produces a size-controlled,
+    structured ContextPack. Any non-snapshot fields from the helper are surfaced under
+    the ContextPack's auxiliary section (e.g., `mixed`). Helper-reported errors (e.g.,
+    ok=false) are surfaced in `errors`.
+
+    Args:
+        result_json: JSON string returned by a helper call (must parse to a dict).
+        return_mode: Desired snapshot representation {"outline","text","html","dompaths","mixed"}.
+        cleaning_level: Structural/content cleaning intensity (0–3).
+        token_budget: Approximate token cap for the returned snapshot.
+        text_offset: Optional character offset for text mode pagination.
+        html_offset: Optional character offset for html mode pagination.
+
+    Returns:
+        str: JSON-serialized ContextPack.
+
+    Raises:
+        TypeError: If `result_json` is not valid JSON or is not a dict after parsing.
+        ValueError: If `return_mode` is invalid (normalized internally to a default).
+    """
+    # Import here to avoid circular dependency at module load time
+    import mcp_browser_use.helpers as helpers
+
+    try:
+        obj = _json.loads(result_json)
+    except Exception:
+        raise TypeError(f"helper returned non-JSON: {type(result_json)}")
+
+    # Normalize/validate return_mode
+    mode = (return_mode or "outline").lower()
+    if mode not in {"html", "text", "outline", "dompaths", "mixed"}:
+        mode = "outline"
+
+    try:
+        meta = await helpers.get_current_page_meta()
+    except Exception:
+        meta = {"url": None, "title": None, "window_tag": None}
+
+    snap = obj.get("snapshot")
+    if not isinstance(snap, dict):
+        snap = {"url": meta.get("url"), "title": meta.get("title"), "html": ""}
+
+    cp = pack_from_snapshot_dict(
+        snapshot=snap,
+        window_tag=meta.get("window_tag"),
+        return_mode=mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset,
+    )
+
+    # Surface errors in a first-class place
+    if obj.get("ok") is False:
+        try:
+            cp.errors.append({
+                "type": obj.get("error") or "error",
+                "summary": obj.get("summary"),
+                "details": {k: v for k, v in obj.items() if k != "snapshot"},
+            })
+        except Exception:
+            pass
+
+    leftovers = {k: v for k, v in obj.items() if k != "snapshot"}
+    cp.mixed = leftovers
+
+    return _json.dumps(cp, default=lambda o: getattr(o, "__dict__", repr(o)), ensure_ascii=False)

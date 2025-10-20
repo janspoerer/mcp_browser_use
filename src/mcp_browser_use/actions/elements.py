@@ -147,7 +147,7 @@ def debug_element(selector: str, selector_type: str = "css") -> dict:
     if not DRIVER:
         return {"ok": False, "error": "No driver available"}
     try:
-        el = find_element(DRIVER, selector, selector_type, timeout=5.0)
+        el = find_element(driver=DRIVER, selector=selector, selector_type=selector_type, timeout=5.0)
         if not el:
             return {"ok": False, "error": "Element not found"}
         return {

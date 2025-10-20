@@ -215,15 +215,16 @@ debug_element
 import logging
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
-#endregion 
+#endregion
 
 #region Import from your package __init__.py
 import mcp_browser_use as MBU
 from mcp_browser_use.decorators import (
-    tool_envelope, 
+    tool_envelope,
     exclusive_browser_access,
     ensure_driver_ready,
 )
+from mcp_browser_use.helpers_context import to_context_pack as _to_context_pack
 #endregion
 
 #region Logger
@@ -233,82 +234,6 @@ logger.warning(f"mcp_browser_use from: {getattr(MBU, '__file__', '<namespace>')}
 
 #region FastMCP Initialization
 mcp = FastMCP("mcp_browser_use")
-#endregion
-
-
-#beginregion ContextPack
-from mcp_browser_use.helpers_context import pack_from_snapshot_dict
-import json as _json
-
-async def _to_context_pack(result_json: str, return_mode: str, cleaning_level: int, token_budget=1000, text_offset: Optional[int] = None, html_offset: Optional[int] = None) -> str:
-    """
-    Convert a helper's raw JSON result into a JSON-serialized ContextPack envelope.
-
-    Parses a helper response (typically including a "snapshot" dict and auxiliary fields),
-    normalizes `return_mode`, fetches current page metadata, and produces a size-controlled,
-    structured ContextPack. Any non-snapshot fields from the helper are surfaced under
-    the ContextPack's auxiliary section (e.g., `mixed`). Helper-reported errors (e.g.,
-    ok=false) are surfaced in `errors`.
-
-    Args:
-        result_json: JSON string returned by a helper call (must parse to a dict).
-        return_mode: Desired snapshot representation {"outline","text","html","dompaths","mixed"}.
-        cleaning_level: Structural/content cleaning intensity (0–3).
-        token_budget: Approximate token cap for the returned snapshot.
-        text_offset: Optional character offset for text mode pagination.
-        html_offset: Optional character offset for html mode pagination.
-
-    Returns:
-        str: JSON-serialized ContextPack.
-
-    Raises:
-        TypeError: If `result_json` is not valid JSON or is not a dict after parsing.
-        ValueError: If `return_mode` is invalid (normalized internally to a default).
-    """
-    try:
-        obj = _json.loads(result_json)
-    except Exception:
-        raise TypeError(f"helper returned non-JSON: {type(result_json)}")
-
-    # Normalize/validate return_mode
-    mode = (return_mode or "outline").lower()
-    if mode not in {"html", "text", "outline", "dompaths", "mixed"}:
-        mode = "outline"
-
-    try:
-        meta = await MBU.helpers.get_current_page_meta()
-    except Exception:
-        meta = {"url": None, "title": None, "window_tag": None}
-
-    snap = obj.get("snapshot")
-    if not isinstance(snap, dict):
-        snap = {"url": meta.get("url"), "title": meta.get("title"), "html": ""}
-
-    cp = pack_from_snapshot_dict(
-        snapshot=snap,
-        window_tag=meta.get("window_tag"),
-        return_mode=mode,
-        cleaning_level=cleaning_level,
-        token_budget=token_budget,
-        text_offset=text_offset,
-        html_offset=html_offset,
-    )
-
-    # Surface errors in a first-class place
-    if obj.get("ok") is False:
-        try:
-            cp.errors.append({
-                "type": obj.get("error") or "error",
-                "summary": obj.get("summary"),
-                "details": {k: v for k, v in obj.items() if k != "snapshot"},
-            })
-        except Exception:
-            pass
-
-    leftovers = {k: v for k, v in obj.items() if k != "snapshot"}
-    cp.mixed = leftovers
-
-    return _json.dumps(cp, default=lambda o: getattr(o, "__dict__", repr(o)), ensure_ascii=False)
 #endregion
 
 #region Tools -- Navigation
@@ -322,6 +247,10 @@ async def mcp_browser_use__start_browser(
 ) -> str:
     """
     Start a browser session or open a new window in an existing session.
+
+    **Performance Recommendation**: Start with token_budget=1000 and cleaning_level=3
+    (aggressive cleaning) unless you need more content. This reduces token usage
+    significantly while preserving essential information.
 
     Returns:
         ContextPack JSON
@@ -354,6 +283,11 @@ async def mcp_browser_use__navigate_to_url(
     Loads the specified URL in the active window/tab and waits for the main document
     to be ready before capturing the snapshot.
 
+    **Performance Recommendation**: Use token_budget=1000-2000 and cleaning_level=3
+    (aggressive) by default. Only increase token_budget or decrease cleaning_level
+    if you're missing critical information. Most pages work well with 1000 tokens
+    and aggressive cleaning, which removes ads, scripts, and non-content elements.
+
     Args:
         url: Absolute URL to navigate to (e.g., "https://example.com").
         wait_for: Wait condition - "load" (default) or "complete".
@@ -361,11 +295,12 @@ async def mcp_browser_use__navigate_to_url(
             Some shops such as Buderus.de are very slow and require a longer timeout of about 30 seconds.
         return_mode: Controls the content type in the ContextPack snapshot. One of
             {"outline", "text", "html", "dompaths", "mixed"}.
+            **Recommendation**: Use "outline" for navigation, "text" for content extraction.
         cleaning_level: Structural/content cleaning intensity for snapshot rendering.
             0 = none, 1 = light, 2 = default, 3 = aggressive.
-        token_budget: Approximate token cap for the returned snapshot. Never use token budgets larger than 10_000!
-            Be very conservative with the token budgets. They will clog up your context window very quickly.
-            A token budget of 5_000  is usually enought if you are smart with the offset settings.
+            **Recommendation**: Start with 3 (aggressive) to minimize tokens.
+        token_budget: Approximate token cap for the returned snapshot.
+            **Recommendation**: Start with 1000-2000, only increase if needed.
         text_offset: Optional character offset to start text extraction (for pagination).
             Only applies when return_mode="text".
             Example: Use text_offset=10000 to skip the first 10,000 characters.
@@ -448,6 +383,9 @@ async def mcp_browser_use__fill_text(
 
     Focuses the target element, optionally clears existing content, and inserts `text`.
 
+    **Performance Recommendation**: Use token_budget=1000 and cleaning_level=3
+    for most form fills. This is sufficient to verify the action succeeded.
+
     Args:
         selector: Element locator (CSS or XPath).
         text: The exact text to set.
@@ -520,6 +458,9 @@ async def mcp_browser_use__click_element(
 
     Attempts a native WebDriver click by default; optionally falls back to JS-based click
     if `force_js` is True or native click is not possible.
+
+    **Performance Recommendation**: Use token_budget=1000 and cleaning_level=3.
+    After clicking, you typically only need to verify the action succeeded.
 
     Args:
         selector: Element locator (CSS or XPath).
@@ -616,6 +557,9 @@ async def mcp_browser_use__get_debug_diagnostics_info(
     Captures diagnostics such as driver session info, user agent, window size, active
     targets, and other implementation-specific debug fields. Diagnostics are included
     in the ContextPack's auxiliary section (e.g., `mixed.diagnostics`).
+
+    **Performance Recommendation**: Use token_budget=500 and cleaning_level=3.
+    Diagnostic info is typically metadata, not content.
 
     Args:
         return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
@@ -745,6 +689,9 @@ async def mcp_browser_use__scroll(
 
     If `selector` is provided, the element is scrolled into view. Otherwise the viewport
     is scrolled by the given pixel deltas (`dx`, `dy`).
+
+    **Performance Recommendation**: Use token_budget=500-1000 and cleaning_level=3.
+    Scrolling typically reveals limited new content that needs minimal tokens.
 
     Args:
         dx: Horizontal pixels to scroll (+right / -left) when no selector is given.

@@ -173,279 +173,111 @@ MCP_INTRA_PROCESS_LOCK = None
 _sync_from_context()
 #endregion
 
-#region Re-exports from refactored modules
-# Import and re-export from locking modules
-from .locking.file_mutex import (
-    _now,
-    _lock_paths,
-    _file_mutex,
-    start_lock_dir,
-    acquire_start_lock,
-    release_start_lock,
-)
+#region Backwards Compatibility Re-exports
+"""
+DEPRECATED: These re-exports are for backwards compatibility only.
+New code should import directly from the respective modules.
 
+Example:
+    # OLD (deprecated):
+    from mcp_browser_use.helpers import navigate_to_url
+
+    # NEW:
+    from mcp_browser_use.actions.navigation import navigate_to_url
+"""
+
+# Core functions needed by decorators (internal but exported)
 from .locking.action_lock import (
-    get_intra_process_lock,
-    _renew_action_lock,
-    _read_softlock,
-    _write_softlock,
-    _acquire_softlock,
-    _release_action_lock,
-    _acquire_action_lock_or_error,
+    get_intra_process_lock,         # Used by decorators
+    _acquire_action_lock_or_error,  # Used by decorators
+    _renew_action_lock,              # Used by decorators
+    _release_action_lock,            # Used by tools
 )
 
-from .locking.window_registry import (
-    _window_registry_path,
-    _read_window_registry,
-    _write_window_registry,
-    _register_window,
-    _update_window_heartbeat,
-    _unregister_window,
-    cleanup_orphaned_windows,
-)
-
-# Import and re-export from browser modules
 from .browser.process import (
-    _is_port_open,
-    get_free_port,
-    make_process_tag,
-    ensure_process_tag,
-    _read_json,
-    read_rendezvous,
-    write_rendezvous,
-    clear_rendezvous,
-    rendezvous_path,
-    chromedriver_log_path,
-)
-
-from .browser.devtools import (
-    _read_devtools_active_port,
-    devtools_active_port_from_file,
-    _devtools_user_data_dir,
-    _verify_port_matches_profile,
-    _same_dir,
-    is_debugger_listening,
-    _ensure_debugger_ready,
-    _handle_for_target,
-)
-
-from .browser.chrome import (
-    _resolve_chrome_executable,
-    _chrome_binary_for_platform,
-    chrome_running_with_userdata,
-    find_chrome_process_by_port,
-    get_chrome_version,
-    start_or_attach_chrome_from_env,
-    is_default_user_data_dir,
+    ensure_process_tag,              # Used by decorators/tools
+    make_process_tag,                # Used internally
 )
 
 from .browser.driver import (
-    create_webdriver,
-    _ensure_driver,
-    _ensure_driver_and_window,
-    _ensure_singleton_window,
-    close_singleton_window,
-    _cleanup_own_blank_tabs,
-    _close_extra_blank_windows_safe,
-    get_chromedriver_capability_version,
-    _validate_window_context,
+    _ensure_driver_and_window,       # Used by tools
+    _ensure_singleton_window,        # Used by decorators
+    close_singleton_window,          # Used by tools
+    _cleanup_own_blank_tabs,         # Used by tools
+    _close_extra_blank_windows_safe, # Used by tools
 )
 
-# Import and re-export from actions modules
 from .actions.navigation import (
-    _wait_document_ready,
-    navigate_to_url,
-    wait_for_element,
-    get_current_page_meta,
-)
-
-from .actions.elements import (
-    find_element,
-    _wait_clickable_element,
-    get_by_selector,
-    click_element,
-    fill_text,
-    debug_element,
+    _wait_document_ready,            # Used by tools
 )
 
 from .actions.screenshots import (
-    _make_page_snapshot,
-    take_screenshot,
+    _make_page_snapshot,             # Used by tools
 )
 
-from .actions.keyboard import (
-    send_keys,
-    scroll,
-)
-
-# Import and re-export from utils modules
-from .utils.retry import (
-    retry_op,
-)
-
-from .utils.html_utils import (
-    remove_unwanted_tags,
-    get_cleaned_html,
-)
-
-from .utils.diagnostics import (
-    collect_diagnostics,
-)
-
-from .tools.browser_management import (
-    start_browser,
-    unlock_browser,
-    close_browser,
-    force_close_all_chrome,
-)
-
-from .tools.navigation import (
-    navigate_to_url,
-    scroll,
-)
-
-from .tools.interaction import (
-    fill_text,
-    click_element,
-    send_keys,
-    wait_for_element,
-)
-
-from .tools.debugging import (
-    get_debug_diagnostics_info,
-    debug_element,
-)
-
-from .tools.screenshots import (
-    take_screenshot,
-)
-
-# get_current_page_meta already imported from .actions.navigation
+# DO NOT re-export everything else - force migration
+# If someone needs it, they import directly from the module
 #endregion
 
-# Maintain backward compatibility - export all  symbols
+# Reduced export list - Only essentials for backwards compatibility
 __all__ = [
-    # Config and keys
+    # ===== Public API (NEW - Recommended) =====
+    # Context
+    'get_context',
+    'reset_context',
+    'BrowserContext',
+
+    # Config
     'get_env_config',
     'profile_key',
-    
-    # Globals
-    'DRIVER',
-    'DEBUGGER_HOST',
-    'DEBUGGER_PORT',
-    'MY_TAG',
-    'ALLOW_ATTACH_ANY',
-    'TARGET_ID',
-    'WINDOW_ID',
-    'LOCK_DIR',
+    'get_lock_dir',
+
+    # Constants
     'ACTION_LOCK_TTL_SECS',
     'ACTION_LOCK_WAIT_SECS',
     'FILE_MUTEX_STALE_SECS',
     'WINDOW_REGISTRY_STALE_THRESHOLD',
     'MAX_SNAPSHOT_CHARS',
-    'MCP_INTRA_PROCESS_LOCK',
     'START_LOCK_WAIT_SEC',
     'RENDEZVOUS_TTL_SEC',
-    
+    'ALLOW_ATTACH_ANY',
+    'LOCK_DIR',
+    'MCP_INTRA_PROCESS_LOCK',
+
+    # ===== Core Functions (Internal but needed by decorators/tools) =====
     # Locking
-    '_now',
-    '_lock_paths',
-    '_file_mutex',
-    'start_lock_dir',
-    'acquire_start_lock',
-    'release_start_lock',
     'get_intra_process_lock',
-    '_renew_action_lock',
-    '_read_softlock',
-    '_write_softlock',
-    '_acquire_softlock',
-    '_release_action_lock',
     '_acquire_action_lock_or_error',
-    '_window_registry_path',
-    '_read_window_registry',
-    '_write_window_registry',
-    '_register_window',
-    '_update_window_heartbeat',
-    '_unregister_window',
-    'cleanup_orphaned_windows',
-    
-    # Browser/Process
-    '_is_port_open',
-    'get_free_port',
+    '_renew_action_lock',
+    '_release_action_lock',
+
+    # Process
     'ensure_process_tag',
     'make_process_tag',
-    '_read_json',
-    'read_rendezvous',
-    'write_rendezvous',
-    'clear_rendezvous',
-    'rendezvous_path',
-    'chromedriver_log_path',
-    
-    # Browser/DevTools
-    '_read_devtools_active_port',
-    'devtools_active_port_from_file',
-    '_devtools_user_data_dir',
-    '_verify_port_matches_profile',
-    '_same_dir',
-    'is_debugger_listening',
-    '_ensure_debugger_ready',
-    '_handle_for_target',
-    
-    # Browser/Chrome
-    '_resolve_chrome_executable',
-    '_chrome_binary_for_platform',
-    'chrome_running_with_userdata',
-    'find_chrome_process_by_port',
-    'get_chrome_version',
-    'start_or_attach_chrome_from_env',
-    'is_default_user_data_dir',
-    
-    # Browser/Driver
-    'create_webdriver',
-    '_ensure_driver',
+
+    # Driver
     '_ensure_driver_and_window',
     '_ensure_singleton_window',
     'close_singleton_window',
     '_cleanup_own_blank_tabs',
     '_close_extra_blank_windows_safe',
-    'get_chromedriver_capability_version',
-    '_validate_window_context',
-    
+
     # Actions
     '_wait_document_ready',
-    'navigate_to_url',
-    'wait_for_element',
-    'get_current_page_meta',
-    'find_element',
-    '_wait_clickable_element',
-    'get_by_selector',
-    'click_element',
-    'fill_text',
-    'debug_element',
     '_make_page_snapshot',
-    'take_screenshot',
-    'send_keys',
-    'scroll',
-    
-    # Utils
-    'retry_op',
-    'remove_unwanted_tags',
-    'get_cleaned_html',
-    'collect_diagnostics',
-    'get_debug_diagnostics_info',
 
-    # Async tool implementations
-    'start_browser',
-    'navigate_to_url',
-    'fill_text',
-    'click_element',
-    'take_screenshot',
-    'debug_element',
-    'unlock_browser',
-    'close_browser',
-    'force_close_all_chrome',
-    'scroll',
-    'send_keys',
-    'wait_for_element',
-    'get_current_page_meta',
+    # ===== Backwards Compatibility (DEPRECATED) =====
+    # Old globals - use get_context() instead
+    'DRIVER',              # DEPRECATED: use get_context().driver
+    'DEBUGGER_HOST',       # DEPRECATED: use get_context().debugger_host
+    'DEBUGGER_PORT',       # DEPRECATED: use get_context().debugger_port
+    'TARGET_ID',           # DEPRECATED: use get_context().target_id
+    'WINDOW_ID',           # DEPRECATED: use get_context().window_id
+    'MY_TAG',              # DEPRECATED: use get_context().process_tag
 ]
+
+# NOTE: For all other functions, import directly from the source module:
+#   from mcp_browser_use.actions.navigation import navigate_to_url
+#   from mcp_browser_use.actions.elements import click_element
+#   from mcp_browser_use.browser.chrome import start_or_attach_chrome_from_env
+#   etc.

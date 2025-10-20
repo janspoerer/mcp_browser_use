@@ -7,11 +7,13 @@ from typing import Tuple, Optional
 import psutil
 
 # Import from refactored modules
-from .chrome_executable import validate_user_data_dir
+from .chrome_executable import validate_user_data_dir, get_chrome_binary_for_platform
 from .chrome_launcher import (
     try_attach_existing_chrome,
     launch_on_fixed_port,
     launch_on_dynamic_port,
+    build_chrome_command,
+    launch_chrome_process,
 )
 from .chrome_process import find_chrome_by_port
 from .devtools import devtools_active_port_from_file, is_debugger_listening
@@ -33,6 +35,44 @@ from .chrome_process import (
 
 import logging
 logger = logging.getLogger(__name__)
+
+
+def _launch_chrome_with_debug(cfg: dict, port: int) -> None:
+    """
+    Launch Chrome with remote debugging on a specific port.
+
+    This is a simple wrapper around the chrome_launcher functions,
+    used by devtools.py when it needs to launch Chrome directly.
+
+    Args:
+        cfg: Configuration dict with user_data_dir, profile_name, chrome_path (optional)
+        port: Remote debugging port to use
+
+    Raises:
+        RuntimeError: If Chrome fails to launch
+    """
+    # Get Chrome binary
+    chrome_path = cfg.get("chrome_path")
+    if not chrome_path:
+        chrome_path = get_chrome_binary_for_platform()
+
+    # Build command
+    cmd = build_chrome_command(
+        binary=chrome_path,
+        port=port,
+        user_data_dir=cfg["user_data_dir"],
+        profile_name=cfg.get("profile_name", "Default"),
+    )
+
+    # Launch process
+    proc = launch_chrome_process(cmd, port)
+
+    # Check if process started successfully
+    time.sleep(0.2)  # Brief wait to check if process exits immediately
+    if proc.poll() is not None:
+        raise RuntimeError(f"Chrome process exited immediately with code {proc.returncode}")
+
+    logger.info(f"Launched Chrome on port {port}, pid={proc.pid}")
 
 
 def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[psutil.Process]]:
@@ -114,6 +154,7 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
 
 __all__ = [
     'start_or_attach_chrome_from_env',
+    '_launch_chrome_with_debug',
     # Backward compatibility exports
     '_resolve_chrome_executable',
     '_chrome_binary_for_platform',

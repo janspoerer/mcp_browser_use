@@ -51,7 +51,7 @@ def _acquire_softlock(owner: str, ttl: int, wait: bool = True, wait_timeout: flo
         Dictionary with lock acquisition status
     """
     from .file_mutex import _lock_paths, _file_mutex, _now
-    from ..helpers import FILE_MUTEX_STALE_SECS, ACTION_LOCK_WAIT_SECS
+    from ..constants import FILE_MUTEX_STALE_SECS, ACTION_LOCK_WAIT_SECS
 
     if wait_timeout is None:
         wait_timeout = ACTION_LOCK_WAIT_SECS
@@ -104,7 +104,7 @@ def _release_action_lock(owner: str) -> bool:
         True if lock was released, False otherwise
     """
     from .file_mutex import _lock_paths, _file_mutex
-    from ..helpers import FILE_MUTEX_STALE_SECS
+    from ..constants import FILE_MUTEX_STALE_SECS
 
     softlock_json, softlock_mutex, _ = _lock_paths()
     with _file_mutex(softlock_mutex, stale_secs=FILE_MUTEX_STALE_SECS, wait_timeout=5.0):
@@ -129,7 +129,7 @@ def _renew_action_lock(owner: str, ttl: int) -> bool:
     """
     from .file_mutex import _lock_paths, _file_mutex, _now
     from .window_registry import _update_window_heartbeat
-    from ..helpers import FILE_MUTEX_STALE_SECS
+    from ..constants import FILE_MUTEX_STALE_SECS
 
     softlock_json, softlock_mutex, _ = _lock_paths()
     try:
@@ -164,7 +164,7 @@ def _acquire_action_lock_or_error(owner: str) -> Optional[str]:
     Returns:
         None if lock acquired, error JSON string otherwise
     """
-    from ..helpers import ACTION_LOCK_TTL_SECS, ACTION_LOCK_WAIT_SECS
+    from ..constants import ACTION_LOCK_TTL_SECS, ACTION_LOCK_WAIT_SECS
 
     res = _acquire_softlock(owner=owner, ttl=ACTION_LOCK_TTL_SECS, wait=True, wait_timeout=ACTION_LOCK_WAIT_SECS)
     if res.get("acquired"):

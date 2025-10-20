@@ -22,10 +22,11 @@ def _lock_paths():
         Tuple of (softlock_json, softlock_mutex, startup_mutex) paths
     """
     # Import here to avoid circular dependency
-    from ..helpers import profile_key, get_env_config, LOCK_DIR
+    from ..config.environment import profile_key, get_env_config
+    from ..config.paths import get_lock_dir
 
     key = profile_key(get_env_config())  # stable across processes; independent of port
-    base = Path(LOCK_DIR)
+    base = Path(get_lock_dir())
     base.mkdir(parents=True, exist_ok=True)
     softlock_json = base / f"{key}.softlock.json"
     softlock_mutex = base / f"{key}.softlock.mutex"
@@ -71,7 +72,7 @@ def _file_mutex(path: str, stale_secs: int, wait_timeout: float):
 
 def start_lock_dir(config: dict) -> str:
     """Get path to startup lock directory for the given profile."""
-    from ..helpers import profile_key
+    from ..config.environment import profile_key
     return os.path.join(tempfile.gettempdir(), f"mcp_chrome_start_lock_{profile_key(config)}")
 
 
@@ -87,7 +88,7 @@ def acquire_start_lock(config: dict, timeout_sec: float = None) -> bool:
         True if lock acquired, False on timeout
     """
     if timeout_sec is None:
-        from ..helpers import START_LOCK_WAIT_SEC
+        from ..constants import START_LOCK_WAIT_SEC
         timeout_sec = START_LOCK_WAIT_SEC
 
     lock_dir = start_lock_dir(config)

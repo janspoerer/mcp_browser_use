@@ -13,10 +13,11 @@ logger = logging.getLogger(__name__)
 
 def _window_registry_path() -> str:
     """Get path to window registry file for this profile."""
-    from ..helpers import profile_key, get_env_config, LOCK_DIR
+    from ..config.environment import profile_key, get_env_config
+    from ..config.paths import get_lock_dir
 
     key = profile_key(get_env_config())
-    return str(Path(LOCK_DIR) / f"{key}.window_registry.json")
+    return str(Path(get_lock_dir()) / f"{key}.window_registry.json")
 
 
 def _read_window_registry() -> Dict[str, Any]:
@@ -83,7 +84,7 @@ def cleanup_orphaned_windows(driver, *, close_on_stale: bool = False):
         driver: Selenium WebDriver instance
         close_on_stale: If True, also close windows with stale heartbeats (default False)
     """
-    from ..helpers import WINDOW_REGISTRY_STALE_THRESHOLD
+    from ..constants import WINDOW_REGISTRY_STALE_THRESHOLD
 
     # If you have a registry/file lock, acquire it here
     # with _registry_lock():

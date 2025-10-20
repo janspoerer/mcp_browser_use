@@ -9,7 +9,7 @@ from .cleaners import basic_prune, approx_token_count, extract_outline
 
 
 def _wait_for_dom_ready(driver, timeout=15):
-    WebDriverWait(driver, timeout).until(
+    WebDriverWait(driver=driver, timeout=timeout).until(
         lambda d: d.execute_script("return document.readyState") == "complete"
     )
 
@@ -19,13 +19,13 @@ def _apply_snapshot_settle():
         time.sleep(settle_ms / 1000.0)
 
 def get_outer_html(driver) -> str:
-    _wait_for_dom_ready(driver)
+    _wait_for_dom_ready(driver=driver)
     _apply_snapshot_settle()
     # If you currently use driver.page_source, keep that; both are fine.
     return driver.execute_script("return document.documentElement.outerHTML")
 
 def take_screenshot(driver, path: str):
-    _wait_for_dom_ready(driver)
+    _wait_for_dom_ready(driver=driver)
     _apply_snapshot_settle()
     driver.save_screenshot(path)
 
@@ -51,17 +51,17 @@ def pack_snapshot(
     )
 
     html = raw_html or ""
-    cleaned_html, pruned_counts = basic_prune(html, level=cleaning_level)
+    cleaned_html, pruned_counts = basic_prune(html=html, level=cleaning_level)
     cp.pruned_counts = pruned_counts
 
     if return_mode == ReturnMode.OUTLINE:
-        outline = extract_outline(cleaned_html)
+        outline = extract_outline(html=cleaned_html)
         cp.outline_present = True
         cp.outline = [
             # convert dict -> dataclass-ish dict; leaving as dict is fine for now
             o for o in outline
         ]
-        cp.approx_tokens = approx_token_count(" ".join([o["text"] for o in outline]))
+        cp.approx_tokens = approx_token_count(text=" ".join([o["text"] for o in outline]))
         return cp
 
     if return_mode == ReturnMode.HTML:
@@ -77,7 +77,7 @@ def pack_snapshot(
                 cleaned_html = cleaned_html[:char_budget]
                 cp.hard_capped = True
         cp.html = cleaned_html
-        cp.approx_tokens = approx_token_count(cleaned_html)
+        cp.approx_tokens = approx_token_count(text=cleaned_html)
         return cp
 
     if return_mode == ReturnMode.TEXT:
@@ -98,14 +98,14 @@ def pack_snapshot(
                 txt = txt[:char_budget]
                 cp.hard_capped = True
         cp.text = txt
-        cp.approx_tokens = approx_token_count(txt)
+        cp.approx_tokens = approx_token_count(text=txt)
         return cp
 
     # Fallback to outline
-    outline = extract_outline(cleaned_html)
+    outline = extract_outline(html=cleaned_html)
     cp.outline_present = True
     cp.outline = [o for o in outline]
-    cp.approx_tokens = approx_token_count(" ".join([o["text"] for o in outline]))
+    cp.approx_tokens = approx_token_count(text=" ".join([o["text"] for o in outline]))
     return cp
 
 

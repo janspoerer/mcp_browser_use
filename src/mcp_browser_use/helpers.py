@@ -125,18 +125,13 @@ from .actions.screenshots import (
 # If someone needs it, they import directly from the module
 #endregion
 
-# Reduced export list - Only essentials for backwards compatibility
+# Export list - Only essentials
 __all__ = [
-    # ===== Public API (NEW - Recommended) =====
+    # ===== Public API =====
     # Context
     'get_context',
     'reset_context',
     'BrowserContext',
-
-    # Config
-    'get_env_config',
-    'profile_key',
-    'get_lock_dir',
 
     # Constants
     'ACTION_LOCK_TTL_SECS',
@@ -147,8 +142,6 @@ __all__ = [
     'START_LOCK_WAIT_SEC',
     'RENDEZVOUS_TTL_SEC',
     'ALLOW_ATTACH_ANY',
-    'LOCK_DIR',
-    'MCP_INTRA_PROCESS_LOCK',
 
     # ===== Core Functions (Internal but needed by decorators/tools) =====
     # Locking
@@ -171,15 +164,6 @@ __all__ = [
     # Actions
     '_wait_document_ready',
     '_make_page_snapshot',
-
-    # ===== Backwards Compatibility (DEPRECATED) =====
-    # Old globals - use get_context() instead
-    'DRIVER',              # DEPRECATED: use get_context().driver
-    'DEBUGGER_HOST',       # DEPRECATED: use get_context().debugger_host
-    'DEBUGGER_PORT',       # DEPRECATED: use get_context().debugger_port
-    'TARGET_ID',           # DEPRECATED: use get_context().target_id
-    'WINDOW_ID',           # DEPRECATED: use get_context().window_id
-    'MY_TAG',              # DEPRECATED: use get_context().process_tag
 ]
 
 # NOTE: For all other functions, import directly from the source module:

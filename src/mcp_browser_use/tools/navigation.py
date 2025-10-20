@@ -38,7 +38,7 @@ async def navigate_to_url(
         snapshot = helpers._make_page_snapshot()
         return json.dumps({"ok": True, "action": "navigate", "url": url, "snapshot": snapshot})
     except Exception as e:
-        diag = collect_diagnostics(helpers.DRIVER, e, helpers.get_env_config())
+        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
         snapshot = helpers._make_page_snapshot()
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 
@@ -64,7 +64,7 @@ async def scroll(x: int, y: int, max_snapshot_chars=0, aggressive_cleaning=False
         helpers.DRIVER.execute_script(f"window.scrollBy({int(x)}, {int(y)});")
         time.sleep(0.3)  # Brief pause to allow scroll to complete
 
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
+        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
         return json.dumps({
             "ok": True,
             "action": "scroll",
@@ -73,8 +73,8 @@ async def scroll(x: int, y: int, max_snapshot_chars=0, aggressive_cleaning=False
             "snapshot": snapshot,
         })
     except Exception as e:
-        diag = collect_diagnostics(helpers.DRIVER, e, helpers.get_env_config())
-        snapshot = helpers._make_page_snapshot(max_snapshot_chars, aggressive_cleaning, offset_chars)
+        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
+        snapshot = helpers._make_page_snapshot(max_snapshot_chars=max_snapshot_chars, aggressive_cleaning=aggressive_cleaning, offset_chars=offset_chars)
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
 
 

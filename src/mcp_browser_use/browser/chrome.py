@@ -21,17 +21,6 @@ from .process import read_rendezvous, write_rendezvous
 from ..locking.file_mutex import acquire_start_lock, release_start_lock
 from ..constants import START_LOCK_WAIT_SEC
 
-# Re-export for backward compatibility
-from .chrome_executable import (
-    resolve_chrome_executable as _resolve_chrome_executable,
-    get_chrome_binary_for_platform as _chrome_binary_for_platform,
-    get_chrome_version,
-    is_default_user_data_dir,
-)
-from .chrome_process import (
-    is_chrome_running_with_userdata as chrome_running_with_userdata,
-    find_chrome_by_port as find_chrome_process_by_port,
-)
 
 import logging
 logger = logging.getLogger(__name__)
@@ -155,11 +144,4 @@ def start_or_attach_chrome_from_env(config: dict) -> Tuple[str, int, Optional[ps
 __all__ = [
     'start_or_attach_chrome_from_env',
     '_launch_chrome_with_debug',
-    # Backward compatibility exports
-    '_resolve_chrome_executable',
-    '_chrome_binary_for_platform',
-    'chrome_running_with_userdata',
-    'find_chrome_process_by_port',
-    'get_chrome_version',
-    'is_default_user_data_dir',
 ]

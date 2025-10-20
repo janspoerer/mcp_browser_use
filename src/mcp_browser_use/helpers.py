@@ -130,6 +130,19 @@ def profile_key(config: Optional[dict] = None) -> str:
       Otherwise we allow Chrome to create it and we normalize the path for stability.
     """
     return _profile_key(config)
+
+
+def get_lock_dir() -> str:
+    """
+    Get the lock directory path for cross-process coordination.
+
+    DEPRECATED: Use mcp_browser_use.config.paths.get_lock_dir() directly.
+    This function now delegates to the config module for backwards compatibility.
+
+    Returns:
+        str: Path to the lock directory (typically in temp dir)
+    """
+    return _get_lock_dir()
 #endregion
 
 #region Globals (Backwards Compatible - delegates to context)

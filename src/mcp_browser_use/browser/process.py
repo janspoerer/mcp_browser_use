@@ -8,8 +8,8 @@ import tempfile
 import psutil
 from typing import Optional, Tuple
 
-# Global process tag
-MY_TAG: Optional[str] = None
+from ..constants import RENDEZVOUS_TTL_SEC
+from ..config.environment import profile_key
 
 
 def _is_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
@@ -26,14 +26,6 @@ def get_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
-
-def ensure_process_tag() -> str:
-    """Get or create the global process tag."""
-    global MY_TAG
-    if MY_TAG is None:
-        MY_TAG = make_process_tag()
-    return MY_TAG
 
 
 def make_process_tag() -> str:
@@ -53,13 +45,11 @@ def _read_json(path: str) -> Optional[dict]:
 
 def rendezvous_path(config: dict) -> str:
     """Get path to rendezvous file for this profile."""
-    from ..helpers import profile_key
     return os.path.join(tempfile.gettempdir(), f"mcp_chrome_rendezvous_{profile_key(config)}.json")
 
 
 def chromedriver_log_path(config: dict) -> str:
     """Get path to chromedriver log file for this profile and process."""
-    from ..helpers import profile_key
     return os.path.join(tempfile.gettempdir(), f"chromedriver_shared_{profile_key(config)}_{os.getpid()}.log")
 
 
@@ -70,7 +60,6 @@ def read_rendezvous(config: dict) -> Tuple[Optional[int], Optional[int]]:
     Returns:
         Tuple of (port, pid) or (None, None) if not found/invalid
     """
-    from ..helpers import RENDEZVOUS_TTL_SEC
     from .devtools import is_debugger_listening
 
     path = rendezvous_path(config)
@@ -117,7 +106,6 @@ def clear_rendezvous(config: dict) -> None:
 __all__ = [
     '_is_port_open',
     'get_free_port',
-    'ensure_process_tag',
     'make_process_tag',
     '_read_json',
     'read_rendezvous',

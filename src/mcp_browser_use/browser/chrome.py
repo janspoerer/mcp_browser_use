@@ -17,9 +17,7 @@ from .chrome_process import find_chrome_by_port
 from .devtools import devtools_active_port_from_file, is_debugger_listening
 from .process import read_rendezvous, write_rendezvous
 from ..locking.file_mutex import acquire_start_lock, release_start_lock
-
-# Constants
-START_LOCK_WAIT_SEC = 8.0  # How long to wait to acquire the startup lock
+from ..constants import START_LOCK_WAIT_SEC
 
 # Re-export for backward compatibility
 from .chrome_executable import (

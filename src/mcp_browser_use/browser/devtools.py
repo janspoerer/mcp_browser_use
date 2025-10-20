@@ -10,6 +10,9 @@ from typing import Optional
 import logging
 logger = logging.getLogger(__name__)
 
+from ..context import get_context
+from ..constants import ALLOW_ATTACH_ANY
+
 
 def _read_devtools_active_port(user_data_dir: str) -> int | None:
     """Read debug port from DevToolsActivePort file."""
@@ -79,24 +82,23 @@ def devtools_active_port_from_file(user_data_dir: str) -> Optional[int]:
 def _ensure_debugger_ready(cfg: dict, max_wait_secs: float | None = None) -> None:
     """
     Ensure a debuggable Chrome is running for the configured user-data-dir,
-    set DEBUGGER_HOST/DEBUGGER_PORT accordingly.
+    set debugger host/port in context.
     """
-    from ..helpers import ALLOW_ATTACH_ANY
     from .process import _is_port_open
     from .chrome import start_or_attach_chrome_from_env, _launch_chrome_with_debug
-    
-    # Import global variables
-    import mcp_browser_use.helpers as helpers_module
-    
+
+    ctx = get_context()
+
     try:
         host, port, _ = start_or_attach_chrome_from_env(cfg)
         if not (ALLOW_ATTACH_ANY or _verify_port_matches_profile(host, port, cfg["user_data_dir"])):
             raise RuntimeError("DevTools port does not belong to the configured profile")
-        helpers_module.DEBUGGER_HOST, helpers_module.DEBUGGER_PORT = host, port
+        ctx.debugger_host = host
+        ctx.debugger_port = port
         return
     except Exception:
-        helpers_module.DEBUGGER_HOST = None
-        helpers_module.DEBUGGER_PORT = None
+        ctx.debugger_host = None
+        ctx.debugger_port = None
 
     # Allow override by env; default to 10 seconds
     try:
@@ -114,14 +116,16 @@ def _ensure_debugger_ready(cfg: dict, max_wait_secs: float | None = None) -> Non
     # 1) If the profile already wrote DevToolsActivePort, try to attach to that.
     file_port = _read_devtools_active_port(udir)
     if file_port and _is_port_open("127.0.0.1", file_port):
-        helpers_module.DEBUGGER_HOST, helpers_module.DEBUGGER_PORT = "127.0.0.1", file_port
+        ctx.debugger_host = "127.0.0.1"
+        ctx.debugger_port = file_port
         return
 
     # 2) If allowed, attach to a known open port
     if ALLOW_ATTACH_ANY:
         for p in filter(None, [env_port, 9223]):
             if _is_port_open("127.0.0.1", p):
-                helpers_module.DEBUGGER_HOST, helpers_module.DEBUGGER_PORT = "127.0.0.1", p
+                ctx.debugger_host = "127.0.0.1"
+                ctx.debugger_port = p
                 return
 
     # 3) Launch our own debuggable Chrome
@@ -133,11 +137,13 @@ def _ensure_debugger_ready(cfg: dict, max_wait_secs: float | None = None) -> Non
     while time.time() - t0 < max_wait_secs:
         p = _read_devtools_active_port(udir)
         if (p and _is_port_open("127.0.0.1", p)) or _is_port_open("127.0.0.1", port):
-            helpers_module.DEBUGGER_HOST, helpers_module.DEBUGGER_PORT = "127.0.0.1", p or port
+            ctx.debugger_host = "127.0.0.1"
+            ctx.debugger_port = p or port
             return
         time.sleep(0.1)
 
-    helpers_module.DEBUGGER_HOST = helpers_module.DEBUGGER_PORT = None
+    ctx.debugger_host = None
+    ctx.debugger_port = None
 
 
 def _handle_for_target(driver, target_id: Optional[str]) -> Optional[str]:

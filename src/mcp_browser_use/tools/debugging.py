@@ -33,7 +33,7 @@ async def get_debug_diagnostics_info() -> str:
             except Exception:
                 devtools_http = {"ok": False}
 
-        diag_summary = collect_diagnostics(helpers.DRIVER, None, cfg)  # string
+        diag_summary = collect_diagnostics(driver=helpers.DRIVER, exc=None, config=cfg)  # string
         diagnostics = {
             "summary": diag_summary,
             "driver_initialized": bool(helpers.DRIVER),
@@ -48,7 +48,7 @@ async def get_debug_diagnostics_info() -> str:
         return json.dumps({"ok": True, "diagnostics": diagnostics, "snapshot": snapshot})
     except Exception as e:
 
-        diag = collect_diagnostics(helpers.DRIVER, e, helpers.get_env_config())
+        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
         return json.dumps({"ok": False, "error": str(e), "diagnostics": {"summary": diag}})
 
 async def debug_element(
@@ -94,10 +94,10 @@ async def debug_element(
         }
 
         try:
-            el = helpers.retry_op(lambda: helpers.find_element(
-                helpers.DRIVER,
-                selector,
-                selector_type,
+            el = helpers.retry_op(op=lambda: helpers.find_element(
+                driver=helpers.DRIVER,
+                selector=selector,
+                selector_type=selector_type,
                 timeout=int(timeout),
                 visible_only=False,
                 iframe_selector=iframe_selector,
@@ -118,7 +118,7 @@ async def debug_element(
                 info["enabled"] = None
 
             try:
-                helpers._wait_clickable_element(el, helpers.DRIVER, timeout=timeout)
+                helpers._wait_clickable_element(el=el, driver=helpers.DRIVER, timeout=timeout)
                 info["clickable"] = True
             except Exception:
                 info["clickable"] = False
@@ -165,7 +165,7 @@ async def debug_element(
         snapshot = helpers._make_page_snapshot()
         return json.dumps({"ok": True, "debug": info, "snapshot": snapshot})
     except Exception as e:
-        diag = collect_diagnostics(helpers.DRIVER, e, helpers.get_env_config())
+        diag = collect_diagnostics(driver=helpers.DRIVER, exc=e, config=helpers.get_env_config())
         snapshot = helpers._make_page_snapshot()
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diag, "snapshot": snapshot})
     finally:

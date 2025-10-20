@@ -9,11 +9,7 @@ from typing import Optional
 from ..context import get_context
 
 
-def _make_page_snapshot(
-    max_snapshot_chars: Optional[int] = None,   # ignored (legacy)
-    aggressive_cleaning: bool = False,          # ignored (legacy)
-    offset_chars: int = 0,                      # ignored (legacy)
-) -> dict:
+def _make_page_snapshot() -> dict:
     """
     Capture the raw page snapshot (no cleaning, no truncation).
     Returns a dict: {"url": str|None, "title": str|None, "html": str}

@@ -28,19 +28,7 @@ from typing import Callable
 
 __all__ = [
     "exclusive_browser_access",
-    "serialize_only",
-    "deprecated",
 ]
-
-
-def deprecated(reason: str):
-    def _decorator(func):
-        @functools.wraps(func)
-        def _wrapper(*args, **kwargs):
-            warnings.warn(f"{func.__name__} is deprecated: {reason}", DeprecationWarning, stacklevel=2)
-            return func(*args, **kwargs)
-        return _wrapper
-    return _decorator
 
 
 def _validate_config_or_error():
@@ -182,31 +170,3 @@ def exclusive_browser_access(_func=None):
     return decorator if _func is None else decorator(_func)
 
 
-@deprecated("Use exclusive_browser_access instead")
-def serialize_only(fn):
-    """
-    This decorator is used to prevent race conditions when multiple async
-    operations try to access shared browser resources simultaneously. For
-    example, if two MCP tools try to interact with the same browser window
-    at the same time, this decorator ensures they execute sequentially
-    rather than potentially interfering with each other.
-
-    It's particularly important for browser automation where:
-    - DOM operations need to be atomic
-    - Window/tab switching must be coordinated
-    - Screenshot capture shouldn't happen during navigation
-    - Form filling should complete before other actions
-
-    The get_intra_process_lock() returns a shared asyncio.Lock instance
-    that all decorated functions use, ensuring serialization across
-    different MCP tool functions.
-
-    """
-    @functools.wraps(fn)
-    async def wrapper(*args, **kwargs):
-        # Lazy import to avoid import-time cycles
-        from ..helpers import get_intra_process_lock
-        lock = get_intra_process_lock()
-        async with lock:
-            return await fn(*args, **kwargs)
-    return wrapper

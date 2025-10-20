@@ -7,6 +7,7 @@ from .environment import (
 )
 
 from .paths import (
+    get_lock_dir,
     rendezvous_path,
     start_lock_dir,
     chromedriver_log_path,
@@ -19,6 +20,7 @@ __all__ = [
     "get_env_config",
     "profile_key",
     "is_default_user_data_dir",
+    "get_lock_dir",
     "rendezvous_path",
     "start_lock_dir",
     "chromedriver_log_path",

@@ -7,6 +7,36 @@ from pathlib import Path
 from .environment import profile_key
 
 
+_DEFAULT_LOCK_DIR = None
+
+
+def get_lock_dir() -> str:
+    """
+    Get the lock directory path.
+
+    Uses MCP_BROWSER_LOCK_DIR env var if set, otherwise uses:
+        <repo_root>/tmp/mcp_locks
+
+    The directory is created if it doesn't exist.
+
+    Returns:
+        Absolute path to lock directory
+    """
+    global _DEFAULT_LOCK_DIR
+
+    if _DEFAULT_LOCK_DIR is None:
+        # Calculate default: <repo_root>/tmp/mcp_locks
+        repo_root = Path(__file__).parent.parent.parent.parent
+        _DEFAULT_LOCK_DIR = str(repo_root / "tmp" / "mcp_locks")
+
+    lock_dir = os.getenv("MCP_BROWSER_LOCK_DIR") or _DEFAULT_LOCK_DIR
+
+    # Ensure directory exists
+    Path(lock_dir).mkdir(parents=True, exist_ok=True)
+
+    return lock_dir
+
+
 def rendezvous_path(config: dict) -> str:
     """Get the path to the rendezvous file for inter-process communication."""
     return os.path.join(tempfile.gettempdir(), f"mcp_chrome_rendezvous_{profile_key(config)}.json")

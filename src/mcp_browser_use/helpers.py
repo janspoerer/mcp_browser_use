@@ -59,15 +59,42 @@ from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv(filename=".env", usecwd=True), override=True)
 #endregion
 
-#region Constants / policy parameters
-START_LOCK_WAIT_SEC = 8.0                  # How long to wait to acquire the startup lock
-RENDEZVOUS_TTL_SEC = 24 * 3600             # How long a rendezvous file is considered valid
+#region Context Integration (Phase 2)
+# Import new modules
+from .context import get_context, reset_context, BrowserContext
+from .constants import (
+    ACTION_LOCK_TTL_SECS as _ACTION_LOCK_TTL_SECS,
+    ACTION_LOCK_WAIT_SECS as _ACTION_LOCK_WAIT_SECS,
+    FILE_MUTEX_STALE_SECS as _FILE_MUTEX_STALE_SECS,
+    WINDOW_REGISTRY_STALE_THRESHOLD as _WINDOW_REGISTRY_STALE_THRESHOLD,
+    MAX_SNAPSHOT_CHARS as _MAX_SNAPSHOT_CHARS,
+    START_LOCK_WAIT_SEC as _START_LOCK_WAIT_SEC,
+    RENDEZVOUS_TTL_SEC as _RENDEZVOUS_TTL_SEC,
+    ALLOW_ATTACH_ANY as _ALLOW_ATTACH_ANY,
+)
+from .config.environment import get_env_config as _get_env_config, profile_key as _profile_key
+from .config.paths import get_lock_dir as _get_lock_dir
 #endregion
 
-#region Configuration and keys
+#region Constants / policy parameters (Backwards Compatible - delegates to constants.py)
+# These now delegate to constants.py but maintain the old API
+ACTION_LOCK_TTL_SECS = _ACTION_LOCK_TTL_SECS
+ACTION_LOCK_WAIT_SECS = _ACTION_LOCK_WAIT_SECS
+FILE_MUTEX_STALE_SECS = _FILE_MUTEX_STALE_SECS
+WINDOW_REGISTRY_STALE_THRESHOLD = _WINDOW_REGISTRY_STALE_THRESHOLD
+MAX_SNAPSHOT_CHARS = _MAX_SNAPSHOT_CHARS
+START_LOCK_WAIT_SEC = _START_LOCK_WAIT_SEC
+RENDEZVOUS_TTL_SEC = _RENDEZVOUS_TTL_SEC
+ALLOW_ATTACH_ANY = _ALLOW_ATTACH_ANY
+#endregion
+
+#region Configuration and keys (Backwards Compatible - delegates to config module)
 def get_env_config() -> dict:
     """
     Read environment variables and validate required ones.
+
+    DEPRECATED: Use mcp_browser_use.config.environment.get_env_config() directly.
+    This function now delegates to the config module for backwards compatibility.
 
     Prioritizes Chrome Beta over Chrome Canary over Chrome. This is to free the Chrome instance. Chrome is likely
     used by the user already. It is easier to separate the executables. If a user already has the Chrome executable open,
@@ -88,108 +115,62 @@ def get_env_config() -> dict:
                 CANARY_PROFILE_USER_DATA_DIR
                 CANARY_PROFILE_NAME
     """
-    # Base (generic) config
-    user_data_dir = (os.getenv("CHROME_PROFILE_USER_DATA_DIR") or "").strip()
-    if not user_data_dir and not os.getenv("BETA_PROFILE_USER_DATA_DIR") and not os.getenv("CANARY_PROFILE_USER_DATA_DIR"):
-        raise EnvironmentError("CHROME_PROFILE_USER_DATA_DIR is required.")
-
-    profile_name = (os.getenv("CHROME_PROFILE_NAME") or "Default").strip() or "Default"
-    chrome_path = (os.getenv("CHROME_EXECUTABLE_PATH") or "").strip() or None
-
-    # Prefer Beta > Canary > Generic Chrome
-    canary_path = (os.getenv("CANARY_EXECUTABLE_PATH") or "").strip()
-    if canary_path:
-        chrome_path = canary_path
-        user_data_dir = (os.getenv("CANARY_PROFILE_USER_DATA_DIR") or "").strip()
-        profile_name = (os.getenv("CANARY_PROFILE_NAME") or "").strip() or "Default"
-        if not user_data_dir:
-            raise EnvironmentError("CANARY_PROFILE_USER_DATA_DIR is required when CANARY_EXECUTABLE_PATH is set.")
-
-    beta_path = (os.getenv("BETA_EXECUTABLE_PATH") or "").strip()
-    if beta_path:
-        chrome_path = beta_path
-        user_data_dir = (os.getenv("BETA_PROFILE_USER_DATA_DIR") or "").strip()
-        profile_name = (os.getenv("BETA_PROFILE_NAME") or "").strip() or "Default"
-        if not user_data_dir:
-            raise EnvironmentError("BETA_PROFILE_USER_DATA_DIR is required when BETA_EXECUTABLE_PATH is set.")
-
-    fixed_port_env = (os.getenv("CHROME_REMOTE_DEBUG_PORT") or "").strip()
-    fixed_port = int(fixed_port_env) if fixed_port_env.isdigit() else None
-
-    if not user_data_dir:
-            raise EnvironmentError(
-                "No user_data_dir selected. Set CHROME_PROFILE_USER_DATA_DIR, or provide "
-                "BETA_EXECUTABLE_PATH + BETA_PROFILE_USER_DATA_DIR (or CANARY_* equivalents)."
-            )
-
-    return {
-        "user_data_dir": user_data_dir,
-        "profile_name": profile_name,
-        "chrome_path": chrome_path,
-        "fixed_port": fixed_port,
-    }
+    return _get_env_config()
 
 
 def profile_key(config: Optional[dict] = None) -> str:
     """
     Stable key used by cross-process locks, based on absolute user_data_dir + profile_name.
+
+    DEPRECATED: Use mcp_browser_use.config.environment.profile_key() directly.
+    This function now delegates to the config module for backwards compatibility.
+
     - Hard-fails if CHROME_PROFILE_USER_DATA_DIR is missing/blank.
     - If CHROME_PROFILE_STRICT=1 and the directory doesn't exist, hard-fail.
       Otherwise we allow Chrome to create it and we normalize the path for stability.
     """
-    if config is None:
-        config = get_env_config()
-
-    user_data_dir = (config.get("user_data_dir") or "").strip()
-    profile_name = (config.get("profile_name") or "Default").strip() or "Default"
-
-    if not user_data_dir:
-        raise EnvironmentError("CHROME_PROFILE_USER_DATA_DIR is required and cannot be empty.")
-
-    strict = os.getenv("CHROME_PROFILE_STRICT", "0") == "1"
-    p = Path(user_data_dir)
-    if strict and not p.exists():
-        raise FileNotFoundError(f"user_data_dir does not exist: {p}")
-
-    # Normalize to a stable absolute string
-    try:
-        user_data_dir = str(p.resolve())
-    except Exception:
-        user_data_dir = str(p.absolute())
-
-    raw = f"{user_data_dir}|{profile_name}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return _profile_key(config)
 #endregion
 
-#region Globals
+#region Globals (Backwards Compatible - delegates to context)
+# These maintain the old global variable API but delegate to context
+# DEPRECATED: Use get_context() instead
+
+def _sync_from_context():
+    """Sync module globals from context (for backwards compatibility)."""
+    ctx = get_context()
+    global DRIVER, DEBUGGER_HOST, DEBUGGER_PORT, MY_TAG, TARGET_ID, WINDOW_ID, LOCK_DIR
+    DRIVER = ctx.driver
+    DEBUGGER_HOST = ctx.debugger_host
+    DEBUGGER_PORT = ctx.debugger_port
+    MY_TAG = ctx.process_tag
+    TARGET_ID = ctx.target_id
+    WINDOW_ID = ctx.window_id
+    LOCK_DIR = ctx.lock_dir
+
+def _sync_to_context():
+    """Sync context from module globals (for backwards compatibility)."""
+    ctx = get_context()
+    global DRIVER, DEBUGGER_HOST, DEBUGGER_PORT, MY_TAG, TARGET_ID, WINDOW_ID
+    ctx.driver = DRIVER
+    ctx.debugger_host = DEBUGGER_HOST
+    ctx.debugger_port = DEBUGGER_PORT
+    ctx.process_tag = MY_TAG
+    ctx.target_id = TARGET_ID
+    ctx.window_id = WINDOW_ID
+
+# Initialize globals from context
 DRIVER = None
-DEBUGGER_HOST: Optional[str] = None
-DEBUGGER_PORT: Optional[int] = None
-MY_TAG: Optional[str] = None
-ALLOW_ATTACH_ANY = os.getenv("MCP_ATTACH_ANY_PROFILE", "0") == "1"
+DEBUGGER_HOST = None
+DEBUGGER_PORT = None
+MY_TAG = None
+TARGET_ID = None
+WINDOW_ID = None
+LOCK_DIR = _get_lock_dir()
+MCP_INTRA_PROCESS_LOCK = None
 
-# Single-window identity for this process
-TARGET_ID: Optional[str] = None
-WINDOW_ID: Optional[int] = None
-
-# Lock directory
-_DEFAULT_LOCK_DIR = str(Path(__file__).parent.parent.parent / "tmp" / "mcp_locks")
-LOCK_DIR = os.getenv("MCP_BROWSER_LOCK_DIR") or _DEFAULT_LOCK_DIR
-Path(LOCK_DIR).mkdir(parents=True, exist_ok=True)
-
-# Action lock TTL and wait time
-ACTION_LOCK_TTL_SECS = int(os.getenv("MCP_ACTION_LOCK_TTL", "30"))
-ACTION_LOCK_WAIT_SECS = int(os.getenv("MCP_ACTION_LOCK_WAIT", "60"))
-FILE_MUTEX_STALE_SECS = int(os.getenv("MCP_FILE_MUTEX_STALE_SECS", "60"))
-
-# Window registry
-WINDOW_REGISTRY_STALE_THRESHOLD = int(os.getenv("MCP_WINDOW_REGISTRY_STALE_SECS", "300"))
-
-# Truncation
-MAX_SNAPSHOT_CHARS = int(os.getenv("MCP_MAX_SNAPSHOT_CHARS", "10000"))
-
-# Intra-process lock
-MCP_INTRA_PROCESS_LOCK: Optional[asyncio.Lock] = None
+# Sync from context
+_sync_from_context()
 #endregion
 
 #region Re-exports from refactored modules

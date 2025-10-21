@@ -69,12 +69,12 @@ def get_chrome_binary_for_platform(config: dict) -> str:
 
     if system == "Windows":
         candidates = [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files\Google\Chrome Beta\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome Beta\Application\chrome.exe",
             "chrome",
         ]
     elif system == "Darwin":
-        candidates = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+        candidates = ["/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome"]
     else:
         candidates = ["google-chrome", "chrome", "chromium", "chromium-browser"]
 

@@ -60,6 +60,55 @@ def build_chrome_command(
     if is_headless:
         cmd.append("--headless=new")
 
+    # Load unpacked extensions from an external Extensions folder
+    # This prevents Chrome from auto-deleting extensions it doesn't recognize
+    enable_extensions = os.getenv("MCP_ENABLE_EXTENSIONS", "0").strip()
+
+    # Debug logging to file
+    debug_log_dir = Path(tempfile.gettempdir()) / "mcp_browser_logs"
+    debug_log_dir.mkdir(exist_ok=True)
+    debug_log_file = debug_log_dir / "extension_loading_debug.log"
+
+    with open(debug_log_file, "a") as f:
+        f.write(f"\n=== Extension Loading Debug {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        f.write(f"MCP_ENABLE_EXTENSIONS env var: {enable_extensions}\n")
+        f.write(f"user_data_dir: {user_data_dir}\n")
+        f.write(f"profile_name: {profile_name}\n")
+
+    if enable_extensions in ("1", "true", "True", "yes", "Yes"):
+        # Load extensions from dedicated MCPExtensions folder
+        # This avoids conflicts with Chrome's internal extension management
+        if platform.system() == "Windows":
+            extensions_base_path = Path(os.path.expandvars(r"%USERPROFILE%\MCPExtensions"))
+        else:
+            extensions_base_path = Path(os.path.expanduser("~/MCPExtensions"))
+
+        with open(debug_log_file, "a") as f:
+            f.write(f"extensions_base_path: {extensions_base_path}\n")
+            f.write(f"extensions_base_path.exists(): {extensions_base_path.exists()}\n")
+
+        extension_paths = []
+        if extensions_base_path.exists():
+            # Scan all subdirectories in MCPExtensions for valid extensions
+            for extension_dir in extensions_base_path.iterdir():
+                if extension_dir.is_dir() and (extension_dir / "manifest.json").exists():
+                    extension_paths.append(str(extension_dir))
+
+        with open(debug_log_file, "a") as f:
+            f.write(f"Found {len(extension_paths)} extension(s)\n")
+            for path in extension_paths:
+                f.write(f"  - {path}\n")
+
+        if extension_paths:
+            # Join all extension paths with comma
+            load_ext_arg = f"--load-extension={','.join(extension_paths)}"
+            cmd.append(load_ext_arg)
+            logger.info(f"Loading {len(extension_paths)} extension(s): {extension_paths}")
+
+            with open(debug_log_file, "a") as f:
+                f.write(f"Added to command: {load_ext_arg}\n")
+                f.write(f"Full command: {' '.join(cmd)}\n")
+
     return cmd
 
 

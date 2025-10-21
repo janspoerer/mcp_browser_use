@@ -7,7 +7,14 @@
                 "-m",
                 "mcp_browser_use"
             ],
-            "env": {}
+            "env": {
+                "BETA_PROFILE_NAME": "MCP_Profile",
+                "BETA_EXECUTABLE_PATH": "C:\\Program Files\\Google\\Chrome Beta\\Application\\chrome.exe",
+                "BETA_PROFILE_USER_DATA_DIR": "C:\\Users\\j.spoerer\\AppData\\Local\\Google\\Chrome Beta\\User Data",
+                "CHROME_REMOTE_DEBUG_PORT": "9225",
+                "MCP_HEADLESS": "0",
+                "MCP_ENABLE_EXTENSIONS": "1"
+            }
         }
     }
 }

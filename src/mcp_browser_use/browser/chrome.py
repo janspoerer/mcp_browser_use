@@ -2,6 +2,7 @@
 
 import os
 import time
+import platform
 from pathlib import Path
 from typing import Tuple, Optional
 import psutil
@@ -56,10 +57,12 @@ def _launch_chrome_with_debug(cfg: dict, port: int) -> None:
     # Launch process
     proc = launch_chrome_process(cmd, port)
 
-    # Check if process started successfully
-    time.sleep(0.2)  # Brief wait to check if process exits immediately
-    if proc.poll() is not None:
-        raise RuntimeError(f"Chrome process exited immediately with code {proc.returncode}")
+    # On Windows, Chrome's launcher process exits immediately after spawning background processes.
+    # This is normal behavior. Only check for immediate exit on non-Windows platforms.
+    if platform.system() != "Windows":
+        time.sleep(0.2)  # Brief wait to check if process exits immediately
+        if proc.poll() is not None:
+            raise RuntimeError(f"Chrome process exited immediately with code {proc.returncode}")
 
     logger.info(f"Launched Chrome on port {port}, pid={proc.pid}")
 

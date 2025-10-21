@@ -70,15 +70,72 @@ If the setup was successful, you will see a small hammer icon in the bottom-righ
 
 Click the hammer to see the available tools.
 
-## `.env` Variables
+## Environment Variable Configuration
 
+**IMPORTANT:** Define all environment variables in your project root `.mcp.json` file, **NOT** in `.env` files. This ensures a single source of truth with no conflicts.
+
+### Recommended Configuration (Chrome Beta)
+
+Add environment variables to the `env` section of your `.mcp.json` file:
+
+```json
+{
+  "mcpServers": {
+    "mcp_browser_use": {
+      "type": "stdio",
+      "command": "/path/to/.venv/bin/python",
+      "args": ["-m", "mcp_browser_use"],
+      "env": {
+        "BETA_PROFILE_NAME": "SeleniumProfile",
+        "BETA_EXECUTABLE_PATH": "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+        "BETA_PROFILE_USER_DATA_DIR": "/Users/yourname/Library/Application Support/Google/Chrome Beta",
+        "CHROME_REMOTE_DEBUG_PORT": "9225",
+        "MCP_HEADLESS": "0",
+        "MCP_ENABLE_EXTENSIONS": "1",
+        "MAX_SNAPSHOT_CHARS": "10000"
+      }
+    }
+  }
+}
 ```
-CHROME_PROFILE_NAME=Selenium
-CHROME_EXECUTABLE_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
-CHROME_PROFILE_USER_DATA_DIR=/Users/janspoerer/Library/Application Support/Google/Chrome
-CHROME_PROFILE_NAME=Profile 15
-MCP_MAX_SNAPSHOT_CHARS=10000
+
+**Windows Example:**
+```json
+"env": {
+  "BETA_PROFILE_NAME": "SeleniumProfile",
+  "BETA_EXECUTABLE_PATH": "C:\\Program Files\\Google\\Chrome Beta\\Application\\chrome.exe",
+  "BETA_PROFILE_USER_DATA_DIR": "C:\\Users\\yourname\\AppData\\Local\\Google\\Chrome Beta\\User Data",
+  "CHROME_REMOTE_DEBUG_PORT": "9225",
+  "MCP_HEADLESS": "0",
+  "MCP_ENABLE_EXTENSIONS": "1"
+}
 ```
+
+### Environment Variable Reference
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `BETA_PROFILE_NAME` | Name of Chrome profile to use | `"SeleniumProfile"` |
+| `BETA_EXECUTABLE_PATH` | Path to Chrome Beta executable | See examples above |
+| `BETA_PROFILE_USER_DATA_DIR` | Chrome Beta user data directory | See examples above |
+| `CHROME_REMOTE_DEBUG_PORT` | Port for Chrome remote debugging | `"9225"` |
+| `MCP_HEADLESS` | Run in headless mode (0=no, 1=yes) | `"0"` |
+| `MCP_ENABLE_EXTENSIONS` | Enable Chrome extensions (0=no, 1=yes) | `"1"` |
+| `MAX_SNAPSHOT_CHARS` | Maximum HTML snapshot size | `"10000"` |
+
+### Why Use Chrome Beta?
+
+Using Chrome Beta (or Canary) prevents conflicts with your regular Chrome browser:
+- AI agents require Chrome to run with remote debugging enabled
+- Your normal Chrome instance cannot run with remote debugging
+- Chrome Beta allows both to coexist on the same system
+
+### Profile Recommendations
+
+- **Use a dedicated profile** like `"SeleniumProfile"` (NOT `"Default"`)
+- This prevents conflicts if you open Chrome Beta manually
+- Extensions and logins persist in this profile across sessions
+- Each AI agent gets its own browser window but shares the profile
 
 ## Available Tools
 

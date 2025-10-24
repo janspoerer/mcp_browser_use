@@ -416,7 +416,7 @@ async def mcp_browser_use__navigate_to_url(
         url: Absolute URL to navigate to (e.g., "https://example.com").
         wait_for: Wait condition - "load" (default) or "complete".
         timeout_sec: Maximum time (seconds) to wait for navigation readiness. Waits for asynchronous data to load.
-            Some shops such as Buderus.de are very slow and require a longer timeout of about 90 seconds.
+            Some websites are very slow and require a longer timeout of about 90 seconds.
         return_mode: Controls the content type in the ContextPack snapshot. One of
             {"outline", "text", "html", "dompaths", "mixed"}.
             **Recommendation**: Use "outline" for navigation, "text" for content extraction.

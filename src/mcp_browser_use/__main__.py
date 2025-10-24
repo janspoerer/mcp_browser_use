@@ -57,6 +57,8 @@ When a second agent opens a browser, the agent gets its own browser window. IT M
 
 * **Flexible Snapshot Modes:** Every tool returns configurable snapshots in multiple formats: `outline` (headings), `text` (extracted text), `html` (cleaned HTML), `dompaths` (element paths), or `mixed` (combination). Choose the representation that best fits your use case.
 
+* **Fine-Grained Element Extraction:** The `extract_elements` tool allows you to extract specific data from the page using CSS selectors or XPath expressions. Specify multiple selectors and choose whether to extract HTML or text content from each matched element. This enables precise data extraction without overwhelming context with full page snapshots. The tool supports iframe and shadow DOM contexts, and can also serve as a standalone "get current page state" tool when called without selectors.
+
 
 """
 #endregion
@@ -169,12 +171,47 @@ close_browser
 wait_for_element
 ```
 > Wait for an element to be present, visible, or clickable.
-> 
+>
 >     Args:
 >         selector: CSS selector, XPath, or ID of the element
 >         selector_type: Type of selector (css, xpath, id)
 >         timeout: Maximum time to wait in seconds
 >         condition: What to wait for - 'present', 'visible', or 'clickable'
+
+
+```
+extract_elements
+```
+> Extract content from specific elements on the current page using CSS selectors or XPath.
+> This tool enables fine-grained data extraction without requiring full page snapshots.
+>
+> **MODE 1: Simple Extraction** - Extract individual elements
+>     Args:
+>         selectors: List of selector specifications with optional "name" field
+>         Examples:
+>             - [{"selector": "span.price", "type": "css", "format": "text", "name": "price"}]
+>             - Get current state: selectors=None (returns full page snapshot)
+>
+> **MODE 2: Structured Extraction** - Extract from multiple containers (ideal for product listings)
+>     Args:
+>         container_selector: CSS/XPath for containers (e.g., "article.product-item")
+>         fields: List of field extractors with field_name, selector, attribute, regex, fallback
+>         selector_type: "css" or "xpath" for container
+>         wait_for_visible: Wait for containers to be visible
+>         extraction_timeout: Timeout in seconds
+>
+>     Example (scrape all products on page):
+>         container_selector = "article.product-item"  # or "//article[@class='product-item']"
+>         fields = [
+>             {"field_name": "product_name", "selector": "h3.title"},
+>             {"field_name": "mpn", "selector": "span[data-mpn]", "attribute": "data-mpn"},
+>             {"field_name": "price_brutto", "selector": ".price", "regex": "[0-9,.]+"},
+>             {"field_name": "url", "selector": "a", "attribute": "href"}
+>         ]
+>         # selector_type is optional - auto-detects from container_selector syntax
+>
+>     Returns:
+>         Structured array: [{"product_name": "...", "mpn": "...", "price_brutto": "..."}, ...]
 
 
 ```
@@ -227,13 +264,85 @@ from mcp_browser_use.decorators import (
 from mcp_browser_use.helpers_context import to_context_pack as _to_context_pack
 
 # Import tools directly (not via helpers) to break circular dependency
-from mcp_browser_use.tools import browser_management, navigation, interaction, screenshots, debugging
+from mcp_browser_use.tools import browser_management, navigation, interaction, screenshots, debugging, extraction
 #endregion
 
 #region Logger
 logger = logging.getLogger(__name__)
-logger.warning(f"mcp_browser_use from: {getattr(MBU, '__file__', '<namespace>')}")
 #endregion
+
+#region Helper Functions
+async def _merge_extraction_results(
+    action_result_json: str,
+    extract_selectors: Optional[list] = None,
+    extract_container: Optional[str] = None,
+    extract_fields: Optional[list] = None,
+    extract_selector_type: Optional[str] = None,
+    extract_wait_visible: bool = False,
+    extract_timeout: int = 10,
+    extract_max_items: Optional[int] = None,
+    extract_discover: bool = False,
+) -> str:
+    """
+    Helper to merge extraction results into action results.
+
+    If extraction parameters are provided, performs extraction and merges results
+    into the action result JSON before returning to _to_context_pack.
+
+    Args:
+        action_result_json: JSON result from the action
+        extract_selectors: Simple extraction selectors
+        extract_container: Container selector for structured extraction
+        extract_fields: Fields for structured extraction
+        extract_selector_type: Selector type for container
+        extract_wait_visible: Wait for elements to be visible
+        extract_timeout: Timeout for extraction
+        extract_max_items: Limit number of containers to extract
+        extract_discover: Discovery mode flag
+
+    Returns:
+        Merged JSON result with extraction data
+    """
+    import json as _json
+
+    # If no extraction parameters, return original result
+    if not extract_selectors and not extract_container:
+        return action_result_json
+
+    # Perform extraction
+    extraction_result_json = await extraction.extract_elements(
+        selectors=extract_selectors,
+        container_selector=extract_container,
+        fields=extract_fields,
+        selector_type=extract_selector_type,
+        wait_for_visible=extract_wait_visible,
+        timeout=extract_timeout,
+        max_items=extract_max_items,
+        discover_containers=extract_discover
+    )
+
+    # Parse both results
+    try:
+        action_result = _json.loads(action_result_json)
+        extraction_result = _json.loads(extraction_result_json)
+
+        # Merge extraction data into action result
+        # The extraction results will appear in the 'mixed' field via _to_context_pack
+        action_result['extraction'] = {
+            'mode': extraction_result.get('mode'),
+            'extracted_elements': extraction_result.get('extracted_elements'),
+            'items': extraction_result.get('items'),
+            'count': extraction_result.get('count')
+        }
+
+        return _json.dumps(action_result)
+    except Exception:
+        # If merge fails, return original result
+        return action_result_json
+#endregion
+
+#region Logging
+logger.warning(f"mcp_browser_use from: {getattr(MBU, '__file__', '<namespace>')}")
 
 #region FastMCP Initialization
 mcp = FastMCP("mcp_browser_use")
@@ -279,6 +388,15 @@ async def mcp_browser_use__navigate_to_url(
     token_budget: int = 5_000,
     text_offset: Optional[int] = None,
     html_offset: Optional[int] = None,
+    # Optional extraction parameters
+    extract_selectors: Optional[list] = None,
+    extract_container: Optional[str] = None,
+    extract_fields: Optional[list] = None,
+    extract_selector_type: Optional[str] = None,
+    extract_wait_visible: bool = False,
+    extract_timeout: int = 10,
+    extract_max_items: Optional[int] = None,
+    extract_discover: bool = False,
 ) -> str:
     """
     MCP tool: Navigate the current tab to the given URL and return a ContextPack snapshot.
@@ -295,14 +413,14 @@ async def mcp_browser_use__navigate_to_url(
         url: Absolute URL to navigate to (e.g., "https://example.com").
         wait_for: Wait condition - "load" (default) or "complete".
         timeout_sec: Maximum time (seconds) to wait for navigation readiness. Waits for asynchronous data to load.
-            Some shops such as Buderus.de are very slow and require a longer timeout of about 30 seconds.
+            Some shops such as Buderus.de are very slow and require a longer timeout of about 90 seconds.
         return_mode: Controls the content type in the ContextPack snapshot. One of
             {"outline", "text", "html", "dompaths", "mixed"}.
             **Recommendation**: Use "outline" for navigation, "text" for content extraction.
         cleaning_level: Structural/content cleaning intensity for snapshot rendering.
             0 = none, 1 = light, 2 = default, 3 = aggressive.
             **Recommendation**: Start with 3 (aggressive) to minimize tokens.
-        token_budget: Approximate token cap for the returned snapshot.
+        token_budget: Approximate token cap for the returned snapshot. Should usually be 5_000 or lower.
             **Recommendation**: Start with 1000-2000, only increase if needed.
         text_offset: Optional character offset to start text extraction (for pagination).
             Only applies when return_mode="text".
@@ -311,6 +429,14 @@ async def mcp_browser_use__navigate_to_url(
             Only applies when return_mode="html".
             Example: Use html_offset=50000 to skip the first 50,000 characters of cleaned HTML.
             Note: Offset is applied AFTER cleaning_level processing but BEFORE token_budget truncation.
+
+        extract_selectors: [OPTIONAL EXTRACTION] Simple extraction selectors (MODE 1).
+            See extract_elements tool for format.
+        extract_container: [OPTIONAL EXTRACTION] Container selector for structured extraction (MODE 2).
+        extract_fields: [OPTIONAL EXTRACTION] Field extractors for structured extraction (MODE 2).
+        extract_selector_type: [OPTIONAL EXTRACTION] Selector type for container (auto-detects if None).
+        extract_wait_visible: [OPTIONAL EXTRACTION] Wait for containers to be visible.
+        extract_timeout: [OPTIONAL EXTRACTION] Timeout for extraction in seconds.
 
     Returns:
         str: JSON-serialized ContextPack with post-navigation snapshot.
@@ -350,8 +476,38 @@ async def mcp_browser_use__navigate_to_url(
           - Long documentation pages
           - Search results with many pages loaded via infinite scroll
           - Large data tables with 10,000+ rows
+
+        - **Extraction Integration:**
+          You can optionally extract data immediately after navigation by providing
+          extraction parameters. This combines navigation + extraction in a single call:
+
+          Example:
+              navigate_to_url(
+                  url="https://example.com/products",
+                  extract_container="article.product-item",
+                  extract_fields=[
+                      {"field_name": "product_name", "selector": "h3.title"},
+                      {"field_name": "price", "selector": ".price", "regex": "[0-9,.]+"}
+                  ]
+              )
+
+          This is more efficient than calling navigate followed by extract_elements separately.
     """
     result = await navigation.navigate_to_url(url=url, wait_for=wait_for, timeout_sec=timeout_sec)
+
+    # Merge extraction results if extraction parameters provided
+    result = await _merge_extraction_results(
+        action_result_json=result,
+        extract_selectors=extract_selectors,
+        extract_container=extract_container,
+        extract_fields=extract_fields,
+        extract_selector_type=extract_selector_type,
+        extract_wait_visible=extract_wait_visible,
+        extract_timeout=extract_timeout,
+        extract_max_items=extract_max_items,
+        extract_discover=extract_discover
+    )
+
     return await _to_context_pack(
         result_json=result,
         return_mode=return_mode,
@@ -380,6 +536,15 @@ async def mcp_browser_use__fill_text(
     token_budget: int = 5_000,
     text_offset: Optional[int] = None,
     html_offset: Optional[int] = None,
+    # Optional extraction parameters
+    extract_selectors: Optional[list] = None,
+    extract_container: Optional[str] = None,
+    extract_fields: Optional[list] = None,
+    extract_selector_type: Optional[str] = None,
+    extract_wait_visible: bool = False,
+    extract_timeout: int = 10,
+    extract_max_items: Optional[int] = None,
+    extract_discover: bool = False,
 ) -> str:
     """
     MCP tool: Set the value of an input/textarea and return a ContextPack snapshot.
@@ -402,7 +567,14 @@ async def mcp_browser_use__fill_text(
         shadow_root_selector_type: One of {"css", "xpath"}.
         return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
         cleaning_level: Structural/content cleaning intensity (0–3).
-        token_budget: Approximate token cap for the returned snapshot.
+        token_budget: Approximate token cap for the returned snapshot. Should usually be 5_000 or lower.
+
+        extract_selectors: [OPTIONAL EXTRACTION] Simple extraction selectors (MODE 1).
+        extract_container: [OPTIONAL EXTRACTION] Container selector for structured extraction (MODE 2).
+        extract_fields: [OPTIONAL EXTRACTION] Field extractors for structured extraction (MODE 2).
+        extract_selector_type: [OPTIONAL EXTRACTION] Selector type for container (auto-detects if None).
+        extract_wait_visible: [OPTIONAL EXTRACTION] Wait for containers to be visible.
+        extract_timeout: [OPTIONAL EXTRACTION] Timeout for extraction in seconds.
 
     Returns:
         str: JSON-serialized ContextPack with post-input snapshot.
@@ -416,6 +588,8 @@ async def mcp_browser_use__fill_text(
     Notes:
         - Use `send_keys` for complex sequences or special keys.
         - For masked inputs or JS-only fields, consider `force_js` variants if available.
+        - **Extraction Integration**: Useful for extracting search results after submitting
+          a search query (e.g., fill search box + extract results).
     """
     result = await interaction.fill_text(
         selector=selector,
@@ -428,6 +602,20 @@ async def mcp_browser_use__fill_text(
         shadow_root_selector=shadow_root_selector,
         shadow_root_selector_type=shadow_root_selector_type,
     )
+
+    # Merge extraction results if extraction parameters provided
+    result = await _merge_extraction_results(
+        action_result_json=result,
+        extract_selectors=extract_selectors,
+        extract_container=extract_container,
+        extract_fields=extract_fields,
+        extract_selector_type=extract_selector_type,
+        extract_wait_visible=extract_wait_visible,
+        extract_timeout=extract_timeout,
+        extract_max_items=extract_max_items,
+        extract_discover=extract_discover
+    )
+
     return await _to_context_pack(
         result_json=result,
         return_mode=return_mode,
@@ -455,6 +643,15 @@ async def mcp_browser_use__click_element(
     token_budget: int = 5_000,
     text_offset: Optional[int] = None,
     html_offset: Optional[int] = None,
+    # Optional extraction parameters
+    extract_selectors: Optional[list] = None,
+    extract_container: Optional[str] = None,
+    extract_fields: Optional[list] = None,
+    extract_selector_type: Optional[str] = None,
+    extract_wait_visible: bool = False,
+    extract_timeout: int = 10,
+    extract_max_items: Optional[int] = None,
+    extract_discover: bool = False,
 ) -> str:
     """
     MCP tool: Click an element (optionally inside an iframe or shadow root) and return a snapshot.
@@ -477,7 +674,14 @@ async def mcp_browser_use__click_element(
         return_mode: Controls the content type in the ContextPack snapshot.
             {"outline", "text", "html", "dompaths", "mixed"}.
         cleaning_level: Structural/content cleaning intensity (0–3).
-        token_budget: Approximate token cap for the returned snapshot.
+        token_budget: Approximate token cap for the returned snapshot. Should usually be 5_000 or lower.
+
+        extract_selectors: [OPTIONAL EXTRACTION] Simple extraction selectors (MODE 1).
+        extract_container: [OPTIONAL EXTRACTION] Container selector for structured extraction (MODE 2).
+        extract_fields: [OPTIONAL EXTRACTION] Field extractors for structured extraction (MODE 2).
+        extract_selector_type: [OPTIONAL EXTRACTION] Selector type for container (auto-detects if None).
+        extract_wait_visible: [OPTIONAL EXTRACTION] Wait for containers to be visible.
+        extract_timeout: [OPTIONAL EXTRACTION] Timeout for extraction in seconds.
 
     Returns:
         str: JSON-serialized ContextPack with the snapshot after the click.
@@ -493,6 +697,8 @@ async def mcp_browser_use__click_element(
           will first resolve the iframe context, then the shadow root context.
         - Some sites block native clicks; `force_js=True` can bypass those cases, but
           it may not trigger all browser-level side effects (e.g., focus).
+        - **Extraction Integration**: Useful for extracting data after clicking (e.g.,
+          clicking "Show More" and extracting newly loaded products).
     """
     result = await interaction.click_element(
         selector=selector,
@@ -504,6 +710,20 @@ async def mcp_browser_use__click_element(
         shadow_root_selector=shadow_root_selector,
         shadow_root_selector_type=shadow_root_selector_type,
     )
+
+    # Merge extraction results if extraction parameters provided
+    result = await _merge_extraction_results(
+        action_result_json=result,
+        extract_selectors=extract_selectors,
+        extract_container=extract_container,
+        extract_fields=extract_fields,
+        extract_selector_type=extract_selector_type,
+        extract_wait_visible=extract_wait_visible,
+        extract_timeout=extract_timeout,
+        extract_max_items=extract_max_items,
+        extract_discover=extract_discover
+    )
+
     return await _to_context_pack(
         result_json=result,
         return_mode=return_mode,
@@ -567,7 +787,7 @@ async def mcp_browser_use__get_debug_diagnostics_info(
     Args:
         return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
         cleaning_level: Structural/content cleaning intensity (0–3).
-        token_budget: Approximate token cap for the returned snapshot.
+        token_budget: Approximate token cap for the returned snapshot. Should usually be 5_000 or lower.
 
     Returns:
         str: JSON-serialized ContextPack including diagnostics in `mixed`.
@@ -686,6 +906,15 @@ async def mcp_browser_use__scroll(
     token_budget: int = 100,
     text_offset: Optional[int] = None,
     html_offset: Optional[int] = None,
+    # Optional extraction parameters
+    extract_selectors: Optional[list] = None,
+    extract_container: Optional[str] = None,
+    extract_fields: Optional[list] = None,
+    extract_selector_type: Optional[str] = None,
+    extract_wait_visible: bool = False,
+    extract_timeout: int = 10,
+    extract_max_items: Optional[int] = None,
+    extract_discover: bool = False,
 ) -> str:
     """
     MCP tool: Scroll the page or bring an element into view, then return a snapshot.
@@ -707,6 +936,13 @@ async def mcp_browser_use__scroll(
         cleaning_level: Structural/content cleaning intensity (0–3).
         token_budget: Optional approximate token cap for the returned snapshot. It is generally advisable to set a very low token budget when scrolling.
 
+        extract_selectors: [OPTIONAL EXTRACTION] Simple extraction selectors (MODE 1).
+        extract_container: [OPTIONAL EXTRACTION] Container selector for structured extraction (MODE 2).
+        extract_fields: [OPTIONAL EXTRACTION] Field extractors for structured extraction (MODE 2).
+        extract_selector_type: [OPTIONAL EXTRACTION] Selector type for container (auto-detects if None).
+        extract_wait_visible: [OPTIONAL EXTRACTION] Wait for containers to be visible.
+        extract_timeout: [OPTIONAL EXTRACTION] Timeout for extraction in seconds.
+
     Returns:
         str: JSON-serialized ContextPack with post-scroll snapshot.
 
@@ -718,8 +954,25 @@ async def mcp_browser_use__scroll(
     Notes:
         - Some sticky headers may cover targets scrolled into view; consider an offset
           if your implementation supports it.
+        - **Extraction Integration**: Useful for infinite scroll pages where you scroll
+          and extract newly loaded items. Example:
+              scroll(y=1000, extract_container="article.product", extract_fields=[...])
     """
     result = await navigation.scroll(x=x, y=y)
+
+    # Merge extraction results if extraction parameters provided
+    result = await _merge_extraction_results(
+        action_result_json=result,
+        extract_selectors=extract_selectors,
+        extract_container=extract_container,
+        extract_fields=extract_fields,
+        extract_selector_type=extract_selector_type,
+        extract_wait_visible=extract_wait_visible,
+        extract_timeout=extract_timeout,
+        extract_max_items=extract_max_items,
+        extract_discover=extract_discover
+    )
+
     return await _to_context_pack(
         result_json=result,
         return_mode=return_mode,
@@ -761,7 +1014,7 @@ async def mcp_browser_use__send_keys(
         shadow_root_selector_type: One of {"css", "xpath"}.
         return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
         cleaning_level: Structural/content cleaning intensity (0–3).
-        token_budget: Approximate token cap for the returned snapshot.
+        token_budget: Approximate token cap for the returned snapshot. Should usually be 5_000 or lower.
 
     Returns:
         str: JSON-serialized ContextPack with snapshot after key events.
@@ -823,7 +1076,7 @@ async def mcp_browser_use__wait_for_element(
         shadow_root_selector_type: One of {"css", "xpath"}.
         return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}.
         cleaning_level: Structural/content cleaning intensity (0–3).
-        token_budget: Approximate token cap for the returned snapshot.
+        token_budget: Approximate token cap for the returned snapshot. Should usually be 5_000 or lower.
 
     Returns:
         str: JSON-serialized ContextPack capturing the page after the wait condition.
@@ -841,6 +1094,216 @@ async def mcp_browser_use__wait_for_element(
         condition=condition,
         iframe_selector=iframe_selector,
         iframe_selector_type=iframe_selector_type,
+    )
+    return await _to_context_pack(
+        result_json=result,
+        return_mode=return_mode,
+        cleaning_level=cleaning_level,
+        token_budget=token_budget,
+        text_offset=text_offset,
+        html_offset=html_offset
+    )
+
+@mcp.tool()
+@tool_envelope
+@exclusive_browser_access
+@ensure_driver_ready
+async def mcp_browser_use__extract_elements(
+    selectors: Optional[list] = None,
+    container_selector: Optional[str] = None,
+    fields: Optional[list] = None,
+    selector_type: Optional[str] = None,
+    wait_for_visible: bool = False,
+    extraction_timeout: int = 10,
+    max_items: Optional[int] = None,
+    discover_containers: bool = False,
+    return_mode: str = "outline",
+    cleaning_level: int = 2,
+    token_budget: int = 5_000,
+    text_offset: Optional[int] = None,
+    html_offset: Optional[int] = None,
+) -> str:
+    """
+    MCP tool: Extract content from specific elements on the current page or get page snapshot.
+
+    This tool provides two extraction modes:
+
+    MODE 1: Simple Extraction (using 'selectors' parameter)
+    - Extract individual elements with CSS/XPath
+    - Returns list of extracted elements with optional field names
+
+    MODE 2: Structured Extraction (using 'container_selector' + 'fields' parameters)
+    - Find multiple containers (e.g., all product items on a page)
+    - Extract named fields from each container
+    - Support attribute extraction (href, data-*, etc.)
+    - Apply regex patterns to clean extracted values
+    - Returns array of structured objects (perfect for product listings)
+
+    Args:
+        selectors: [MODE 1] Optional list of selector specifications. Each dict contains:
+            {
+                "selector": str,           # CSS selector or XPath expression (required)
+                "type": str,               # "css" or "xpath" (default: "css")
+                "format": str,             # "html" or "text" (default: "html")
+                "name": str,               # Optional: field name for the result
+                "timeout": int,            # Timeout in seconds (default: 10)
+                "iframe_selector": str,    # Optional: selector for parent iframe
+                "iframe_type": str,        # Optional: "css" or "xpath" for iframe
+                "shadow_root_selector": str,  # Optional: selector for shadow root host
+                "shadow_root_type": str,   # Optional: "css" or "xpath" for shadow root
+            }
+
+        container_selector: [MODE 2] CSS or XPath selector for container elements
+            Example: "article.product-item" or "//div[@class='product']"
+
+        fields: [MODE 2] List of field extractors, each dict contains:
+            {
+                "field_name": str,         # Output field name (e.g., "price_net", "mpn")
+                "selector": str,           # CSS/XPath relative to container
+                "selector_type": str,      # "css" or "xpath" (default: "css")
+                "attribute": str,          # Optional: extract attribute (e.g., "href", "data-id")
+                "regex": str,              # Optional: regex to extract/clean value
+                "fallback": str            # Optional: fallback value if extraction fails
+            }
+
+        selector_type: [MODE 2] Optional selector type for container_selector.
+            If None, auto-detects from syntax:
+            - Starts with "//" or "/" → xpath
+            - Otherwise → css
+            Note: Each field in 'fields' has its own selector_type inside the dict.
+
+        wait_for_visible: [MODE 2] Wait for containers to be visible before extracting
+        extraction_timeout: [MODE 2] Timeout in seconds (default: 10s, capped at 5s for discovery)
+
+        max_items: [MODE 2] **NEW** Limit number of containers to extract (None = all).
+            Prevents token explosions and enables testing.
+            Recommended values:
+            - 10 for testing selectors
+            - 50-100 for production extraction
+            Example: max_items=10 extracts only first 10 products
+
+        discover_containers: [MODE 2] **NEW** Discovery mode flag (default: False).
+            When True, returns container analysis instead of full extraction:
+            - Fast (~5s timeout)
+            - Lightweight (~1K tokens)
+            - Returns: count, sample_html, sample_text, common_child_selectors
+            Use this to explore page structure before committing to full extraction
+
+        return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}
+        cleaning_level: Structural/content cleaning intensity (0–3)
+        token_budget: Approximate token cap for the returned snapshot. Should usually be 5_000 or lower.
+        text_offset: Optional character offset for text mode pagination
+        html_offset: Optional character offset for html mode pagination
+
+    Returns:
+        str: JSON-serialized ContextPack with extraction results in 'mixed' field:
+
+        MODE 1 Response:
+        {
+            "mixed": {
+                "mode": "simple",
+                "extracted_elements": [
+                    {"selector": "...", "found": true, "content": "...", "name": "price"},
+                    ...
+                ]
+            },
+            "snapshot": {...},
+            ...
+        }
+
+        MODE 2 Response:
+        {
+            "mixed": {
+                "mode": "structured",
+                "items": [
+                    {"product_name": "Widget A", "mpn": "12345", "price_brutto": "99.99", ...},
+                    {"product_name": "Widget B", "mpn": "67890", "price_brutto": "149.99", ...}
+                ],
+                "count": 2
+            },
+            "snapshot": {...},
+            ...
+        }
+
+    Examples:
+        # MODE 1: Simple extraction with named fields
+        selectors = [
+            {"selector": "span.price", "type": "css", "format": "text", "name": "price"},
+            {"selector": "div.stock", "type": "css", "format": "text", "name": "stock_status"}
+        ]
+
+        # MODE 2A: Discovery mode (NEW!) - Find containers first
+        container_selector = "article.product-item"
+        discover_containers = True
+        # Fast response with: count, sample_html, common_child_selectors
+
+        # MODE 2B: Test extraction - Small batch
+        container_selector = "article.product-item"
+        fields = [
+            {"field_name": "product_name", "selector": "h3.product-title"},
+            {"field_name": "price", "selector": ".price", "regex": r"[0-9,.]+"}
+        ]
+        max_items = 10  # Test on first 10 items only
+
+        # MODE 2C: Full extraction - With safety limit
+        container_selector = "article.product-item"
+        fields = [
+            {"field_name": "product_name", "selector": "h3.product-title", "selector_type": "css"},
+            {"field_name": "mpn", "selector": "span[data-mpn]", "attribute": "data-mpn"},
+            {"field_name": "price_brutto", "selector": ".price-brutto", "regex": r"[0-9,.]+"},
+            {"field_name": "availability", "selector": ".availability-status"},
+            {"field_name": "url", "selector": "a.product-link", "attribute": "href"}
+        ]
+        max_items = 100  # Safety limit to prevent token explosion
+        wait_for_visible = True
+        extraction_timeout = 10  # Lowered from 45s
+
+        # Get current page state without extraction
+        selectors = None, container_selector = None  # Returns full page snapshot
+
+    Raises:
+        ValueError: If selector specification is invalid
+        RuntimeError: If the browser/driver is not ready
+        TimeoutError: If containers not found within extraction_timeout
+
+    Notes:
+        MODE 1:
+        - Each selector processed independently; if one fails, others continue
+        - Failed extractions return found=False with error message
+        - Use "name" field to label extractions
+        - Supports iframes and shadow DOM
+
+        MODE 2:
+        - Ideal for scraping product listings, tables, search results
+        - Extracts all matching containers (e.g., all products on page)
+        - Fields extracted relative to each container
+        - Regex patterns applied after extraction for cleaning
+        - Attribute extraction for links, data-* attributes, etc.
+        - Fallback values prevent missing fields
+        - Returns structured array of objects ready for database insertion
+
+        **NEW WORKFLOW (Recommended):**
+        1. **Discover**: Use discover_containers=True to find correct selector (~5s, ~1K tokens)
+        2. **Test**: Use max_items=10 to validate extraction (~10s, ~5K tokens)
+        3. **Extract**: Use max_items=50-100 for production (~20s, controlled tokens)
+
+        This 3-step workflow prevents:
+        - Wasting time on wrong selectors (45s timeouts)
+        - Token explosions (41K+ tokens from bad selectors)
+        - Context clogging from oversized responses
+
+        - Use return_mode="mixed" to see extraction results alongside page content
+        - All extractions performed on current page state (no navigation)
+    """
+    result = await extraction.extract_elements(
+        selectors=selectors,
+        container_selector=container_selector,
+        fields=fields,
+        selector_type=selector_type,
+        wait_for_visible=wait_for_visible,
+        timeout=extraction_timeout,
+        max_items=max_items,
+        discover_containers=discover_containers
     )
     return await _to_context_pack(
         result_json=result,

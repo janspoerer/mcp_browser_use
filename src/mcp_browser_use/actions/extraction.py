@@ -21,6 +21,7 @@ async def extract_elements(
     timeout: int = 10,
     max_items: Optional[int] = None,
     discover_containers: bool = False,
+    wait_for_content_loaded: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Extract content from specific elements on the current page.
@@ -69,6 +70,17 @@ async def extract_elements(
         discover_containers: [MODE 2] If True, returns container analysis instead of extraction.
                             Use this to explore page structure and find correct selectors.
                             Fast (~5s) and lightweight (~1K tokens).
+        wait_for_content_loaded: [MODE 2] Smart wait for lazy-loaded content (e.g., async prices).
+                                Dict with:
+                                - selector: CSS/XPath to check for loaded content
+                                - min_percentage: % of containers that must have content (default 80)
+                                - timeout: Max wait time in seconds (default 60)
+                                - check_interval: Seconds between checks (default 5)
+                                - check_attribute: Optional attribute to check (default: text)
+                                - min_length: Min length to consider loaded (default 1)
+                                Polls periodically until min_percentage of containers have the
+                                specified content loaded. Essential for Vue.js/React/Angular sites
+                                with asynchronous data loading.
 
     Returns:
         JSON string with structure:
@@ -132,7 +144,8 @@ async def extract_elements(
                 selector_type=selector_type,
                 wait_for_visible=wait_for_visible,
                 timeout=timeout,
-                max_items=max_items
+                max_items=max_items,
+                wait_for_content_loaded=wait_for_content_loaded
             )
             snapshot = _make_page_snapshot()
             return json.dumps({
@@ -353,6 +366,7 @@ async def _extract_structured(
     wait_for_visible: bool = False,
     timeout: int = 10,
     max_items: Optional[int] = None,
+    wait_for_content_loaded: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Extract structured data from multiple containers on the page.
@@ -365,10 +379,20 @@ async def _extract_structured(
                       - Starts with // or / -> xpath
                       - Otherwise -> css
         wait_for_visible: Wait for containers to be visible
-        timeout: Timeout in seconds
+        timeout: Timeout in seconds for finding containers
+        max_items: Optional maximum number of containers to extract
+        wait_for_content_loaded: Optional config for smart waiting on lazy-loaded content.
+                                Dict with keys:
+                                - selector: CSS/XPath to check for loaded content
+                                - min_percentage: % of containers that must have content (default 80)
+                                - timeout: Max wait time in seconds (default 60)
+                                - check_interval: Seconds between checks (default 5)
+                                - check_attribute: Optional attribute to check (default: text)
+                                - min_length: Min length to consider loaded (default 1)
 
     Returns:
-        List of dictionaries, each representing one container's extracted data
+        List of dictionaries, each representing one container's extracted data.
+        Last item may include _wait_metadata with smart wait results.
     """
     ctx = get_context()
     items = []
@@ -410,6 +434,15 @@ async def _extract_structured(
             containers = all_containers
             limited = False
 
+        # Wait for lazy-loaded content if configured
+        wait_metadata = None
+        if wait_for_content_loaded:
+            wait_metadata = _wait_for_lazy_content(
+                containers=containers,
+                wait_config=wait_for_content_loaded,
+                ctx=ctx
+            )
+
         # Extract fields from each container
         for idx, container in enumerate(containers):
             item = {}
@@ -422,14 +455,23 @@ async def _extract_structured(
 
             items.append(item)
 
-        # Add note if results were limited
+        # Add metadata notes
+        metadata_entry = {}
+
+        # Add limit metadata if results were limited
         if limited and total_count > len(containers):
-            items.append({
-                "_note": f"Results limited to first {max_items} items. Total containers available: {total_count}",
-                "_limited": True,
-                "_extracted_count": len(containers),
-                "_total_count": total_count
-            })
+            metadata_entry["_note"] = f"Results limited to first {max_items} items. Total containers available: {total_count}"
+            metadata_entry["_limited"] = True
+            metadata_entry["_extracted_count"] = len(containers)
+            metadata_entry["_total_count"] = total_count
+
+        # Add wait metadata if smart wait was used
+        if wait_metadata:
+            metadata_entry["_wait_metadata"] = wait_metadata
+
+        # Add metadata entry if it has any content
+        if metadata_entry:
+            items.append(metadata_entry)
 
     except TimeoutException:
         items.append({
@@ -443,6 +485,178 @@ async def _extract_structured(
         })
 
     return items
+
+
+def _detect_loading_indicators(container) -> bool:
+    """
+    Detect if a container is in a loading state.
+
+    Checks for common loading indicators:
+    - Classes: skeleton, loading, placeholder, spinner, shimmer
+    - Aria attributes: aria-busy="true"
+    - Empty or placeholder data
+
+    Returns:
+        True if loading indicators detected, False otherwise
+    """
+    try:
+        # Check class names for loading indicators
+        class_attr = container.get_attribute("class") or ""
+        loading_keywords = ["skeleton", "loading", "placeholder", "spinner", "shimmer", "pending"]
+        if any(keyword in class_attr.lower() for keyword in loading_keywords):
+            return True
+
+        # Check aria-busy attribute
+        if container.get_attribute("aria-busy") == "true":
+            return True
+
+        # Check for loading spinners as child elements
+        try:
+            spinners = container.find_elements(By.CSS_SELECTOR, ".spinner, .loading, [class*='spinner'], [class*='loading']")
+            if spinners:
+                return True
+        except:
+            pass
+
+        return False
+    except:
+        return False
+
+
+def _wait_for_lazy_content(
+    containers: List,
+    wait_config: Dict[str, Any],
+    ctx
+) -> Dict[str, Any]:
+    """
+    Wait for lazy-loaded content to appear in containers.
+
+    Polls containers periodically until a minimum percentage have the specified
+    content loaded, or until timeout is reached. This is essential for modern
+    JavaScript-heavy sites that load prices, availability, and other data
+    asynchronously after initial page render.
+
+    Args:
+        containers: List of container WebElements to check
+        wait_config: Configuration dict with:
+            - selector: CSS/XPath selector to check for content (e.g., ".price")
+            - selector_type: Optional "css" or "xpath" (auto-detects if not provided)
+            - min_percentage: Minimum % of containers that must have content (default 80)
+            - timeout: Maximum wait time in seconds (default 60)
+            - check_interval: Seconds between checks (default 5)
+            - check_attribute: Optional attribute to check (default checks text content)
+            - min_length: Minimum length of text/attribute to consider "loaded" (default 1)
+        ctx: Browser context
+
+    Returns:
+        Dict with loading metadata:
+        {
+            "waited": True,
+            "duration_seconds": 23.4,
+            "loaded_count": 21,
+            "total_count": 25,
+            "percentage": 84.0,
+            "timeout_reached": False,
+            "loading_indicators_found": 4,
+            "checks_performed": 5
+        }
+    """
+    import time
+
+    # Parse config with defaults
+    selector = wait_config.get("selector")
+    if not selector:
+        return {"waited": False, "error": "No selector provided in wait_for_content_loaded"}
+
+    selector_type = wait_config.get("selector_type")
+    min_percentage = wait_config.get("min_percentage", 80)
+    timeout_seconds = wait_config.get("timeout", 60)
+    check_interval = wait_config.get("check_interval", 5)
+    check_attribute = wait_config.get("check_attribute")  # None = check text
+    min_length = wait_config.get("min_length", 1)
+
+    # Auto-detect selector type if not provided
+    if selector_type is None:
+        if selector.startswith('//') or selector.startswith('/'):
+            selector_type = "xpath"
+        else:
+            selector_type = "css"
+
+    by_type = get_by_selector(selector_type)
+    if not by_type:
+        return {"waited": False, "error": f"Invalid selector_type: {selector_type}"}
+
+    total_count = len(containers)
+    if total_count == 0:
+        return {"waited": False, "error": "No containers to check"}
+
+    start_time = time.time()
+    checks_performed = 0
+    timeout_reached = False
+
+    while True:
+        checks_performed += 1
+        loaded_count = 0
+        loading_indicators = 0
+
+        # Check each container
+        for container in containers:
+            try:
+                # Check for loading indicators
+                if _detect_loading_indicators(container):
+                    loading_indicators += 1
+
+                # Try to find the content element
+                element = container.find_element(by_type, selector)
+
+                # Extract value
+                if check_attribute:
+                    value = element.get_attribute(check_attribute)
+                else:
+                    value = element.text or ctx.driver.execute_script("return arguments[0].textContent;", element)
+
+                # Check if content is loaded (non-empty and meets min_length)
+                if value and len(str(value).strip()) >= min_length:
+                    loaded_count += 1
+
+            except:
+                # Element not found or error extracting - not loaded yet
+                continue
+
+        # Calculate percentage loaded
+        percentage = (loaded_count / total_count) * 100
+
+        # Check if we've met the threshold
+        if percentage >= min_percentage:
+            duration = time.time() - start_time
+            return {
+                "waited": True,
+                "duration_seconds": round(duration, 2),
+                "loaded_count": loaded_count,
+                "total_count": total_count,
+                "percentage": round(percentage, 1),
+                "timeout_reached": False,
+                "loading_indicators_found": loading_indicators,
+                "checks_performed": checks_performed
+            }
+
+        # Check timeout
+        elapsed = time.time() - start_time
+        if elapsed >= timeout_seconds:
+            timeout_reached = True
+            return {
+                "waited": True,
+                "duration_seconds": round(elapsed, 2),
+                "loaded_count": loaded_count,
+                "total_count": total_count,
+                "percentage": round(percentage, 1),
+                "timeout_reached": True,
+                "loading_indicators_found": loading_indicators,
+                "checks_performed": checks_performed
+            }
+
+        # Sleep before next check
+        time.sleep(check_interval)
 
 
 def _extract_field_from_container(

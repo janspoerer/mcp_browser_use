@@ -282,6 +282,7 @@ async def _merge_extraction_results(
     extract_timeout: int = 10,
     extract_max_items: Optional[int] = None,
     extract_discover: bool = False,
+    extract_wait_content: Optional[dict] = None,
 ) -> str:
     """
     Helper to merge extraction results into action results.
@@ -299,6 +300,7 @@ async def _merge_extraction_results(
         extract_timeout: Timeout for extraction
         extract_max_items: Limit number of containers to extract
         extract_discover: Discovery mode flag
+        extract_wait_content: Smart wait config for lazy-loaded content
 
     Returns:
         Merged JSON result with extraction data
@@ -318,7 +320,8 @@ async def _merge_extraction_results(
         wait_for_visible=extract_wait_visible,
         timeout=extract_timeout,
         max_items=extract_max_items,
-        discover_containers=extract_discover
+        discover_containers=extract_discover,
+        wait_for_content_loaded=extract_wait_content
     )
 
     # Parse both results
@@ -1117,6 +1120,7 @@ async def mcp_browser_use__extract_elements(
     extraction_timeout: int = 10,
     max_items: Optional[int] = None,
     discover_containers: bool = False,
+    wait_for_content_loaded: Optional[dict] = None,
     return_mode: str = "outline",
     cleaning_level: int = 2,
     token_budget: int = 5_000,
@@ -1188,6 +1192,20 @@ async def mcp_browser_use__extract_elements(
             - Lightweight (~1K tokens)
             - Returns: count, sample_html, sample_text, common_child_selectors
             Use this to explore page structure before committing to full extraction
+
+        wait_for_content_loaded: [MODE 2] **NEW** Smart wait for lazy-loaded content (e.g., async prices).
+            Essential for modern JavaScript-heavy sites (Vue.js/React/Angular) that load data
+            asynchronously after initial page render. Dict with keys:
+            {
+                "selector": str,           # CSS/XPath to check for loaded content (e.g., ".price")
+                "min_percentage": int,     # % of containers that must have content (default: 80)
+                "timeout": int,            # Max wait time in seconds (default: 60)
+                "check_interval": int,     # Seconds between checks (default: 5)
+                "check_attribute": str,    # Optional: attribute to check instead of text
+                "min_length": int          # Minimum text/attribute length to consider loaded (default: 1)
+            }
+            Polls periodically until min_percentage of containers have the specified content loaded.
+            Results include _wait_metadata with timing and loading statistics.
 
         return_mode: Snapshot content type {"outline","text","html","dompaths","mixed"}
         cleaning_level: Structural/content cleaning intensity (0–3)
@@ -1303,7 +1321,8 @@ async def mcp_browser_use__extract_elements(
         wait_for_visible=wait_for_visible,
         timeout=extraction_timeout,
         max_items=max_items,
-        discover_containers=discover_containers
+        discover_containers=discover_containers,
+        wait_for_content_loaded=wait_for_content_loaded
     )
     return await _to_context_pack(
         result_json=result,

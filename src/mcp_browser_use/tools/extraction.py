@@ -13,6 +13,7 @@ async def extract_elements(
     timeout: int = 10,
     max_items: Optional[int] = None,
     discover_containers: bool = False,
+    wait_for_content_loaded: Optional[Dict[str, any]] = None,
 ) -> str:
     """
     Extract content from specific elements on the current page.
@@ -33,6 +34,7 @@ async def extract_elements(
         timeout: [MODE 2] Timeout in seconds
         max_items: [MODE 2] Limit number of containers to extract
         discover_containers: [MODE 2] Return container analysis instead of extraction
+        wait_for_content_loaded: [MODE 2] Smart wait config for lazy-loaded content
 
     Returns:
         JSON string with extraction results and page snapshot.
@@ -45,7 +47,8 @@ async def extract_elements(
         wait_for_visible=wait_for_visible,
         timeout=timeout,
         max_items=max_items,
-        discover_containers=discover_containers
+        discover_containers=discover_containers,
+        wait_for_content_loaded=wait_for_content_loaded
     )
 
 

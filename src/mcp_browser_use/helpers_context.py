@@ -178,12 +178,12 @@ async def to_context_pack(result_json: str, return_mode: str, cleaning_level: in
     structured ContextPack. Any non-snapshot fields from the helper are surfaced under
     the ContextPack's auxiliary section (e.g., `mixed`). Helper-reported errors (e.g.,
     ok=false) are surfaced in `errors`.
-
+    
     Args:
         result_json: JSON string returned by a helper call (must parse to a dict).
         return_mode: Desired snapshot representation {"outline","text","html","dompaths","mixed"}.
         cleaning_level: Structural/content cleaning intensity (0–3).
-        token_budget: Approximate token cap for the returned snapshot.
+        token_budget: Approximate token cap for the returned snapshot. Should usually be 5_000 or lower.
         text_offset: Optional character offset for text mode pagination.
         html_offset: Optional character offset for html mode pagination.
 
@@ -225,6 +225,24 @@ async def to_context_pack(result_json: str, return_mode: str, cleaning_level: in
         text_offset=text_offset,
         html_offset=html_offset,
     )
+
+    # Add warning if token budget is too high
+    if token_budget and token_budget > 10_000:
+        cp.errors.append({
+            "type": "warning",
+            "summary": "High token budget detected",
+            "details": {
+                "requested_token_budget": token_budget,
+                "message": (
+                    f"You requested a token budget of {token_budget} tokens, which may clog your context. "
+                    "Consider using the extract_elements tool with structured extraction (MODE 2) "
+                    "to extract only the specific data you need. This can reduce token usage by 90%+ "
+                    "while getting more precise results. "
+                    "Example: extract_elements(container_selector='div.product', fields=[...], max_items=50)"
+                ),
+                "recommendation": "Use extract_elements tool for targeted data extraction instead of large snapshots"
+            }
+        })
 
     # Surface errors in a first-class place
     if obj.get("ok") is False:

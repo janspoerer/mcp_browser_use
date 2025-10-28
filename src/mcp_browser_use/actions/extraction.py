@@ -136,11 +136,12 @@ async def extract_elements(
                 **discovery,
                 "snapshot": snapshot
             })
-        elif fields:
-            # MODE 2: Structured extraction
+        else:
+            # MODE 2: Structured extraction (with or without fields)
+            # When fields is None/empty, extract full text/HTML of each container
             items = await _extract_structured(
                 container_selector=container_selector,
-                fields=fields,
+                fields=fields,  # Can be None - will extract full text/HTML
                 selector_type=selector_type,
                 wait_for_visible=wait_for_visible,
                 timeout=timeout,
@@ -153,20 +154,6 @@ async def extract_elements(
                 "mode": "structured",
                 "items": items,
                 "count": len(items),
-                "snapshot": snapshot
-            })
-        else:
-            # Container specified but no fields - treat as discovery
-            discovery = await _discover_containers(
-                container_selector=container_selector,
-                selector_type=selector_type,
-                timeout=min(timeout, 5)
-            )
-            snapshot = _make_page_snapshot()
-            return json.dumps({
-                "ok": True,
-                "mode": "discovery",
-                **discovery,
                 "snapshot": snapshot
             })
     else:
@@ -361,7 +348,7 @@ def _analyze_child_elements(container, ctx) -> List[Dict[str, Any]]:
 
 async def _extract_structured(
     container_selector: str,
-    fields: List[Dict[str, str]],
+    fields: Optional[List[Dict[str, str]]] = None,
     selector_type: Optional[str] = None,
     wait_for_visible: bool = False,
     timeout: int = 10,
@@ -448,10 +435,23 @@ async def _extract_structured(
             item = {}
             item["_container_index"] = idx
 
-            for field_spec in fields:
-                field_name = field_spec.get("field_name", f"field_{idx}")
-                value = _extract_field_from_container(container, field_spec, ctx)
-                item[field_name] = value
+            if fields:
+                # Extract specified fields
+                for field_spec in fields:
+                    field_name = field_spec.get("field_name", f"field_{idx}")
+                    value = _extract_field_from_container(container, field_spec, ctx)
+                    item[field_name] = value
+            else:
+                # No fields specified - extract full text content of container
+                try:
+                    full_text = ctx.driver.execute_script("return arguments[0].textContent;", container)
+                    if full_text:
+                        # Clean and normalize whitespace
+                        full_text = full_text.replace('\x00', '').encode('utf-8', errors='ignore').decode('utf-8')
+                        full_text = ' '.join(full_text.split())
+                    item["full_text"] = full_text or ""
+                except Exception as e:
+                    item["full_text"] = f"Error extracting text: {str(e)}"
 
             items.append(item)
 

@@ -108,7 +108,7 @@ async def debug_element(
         }
 
         try:
-            el = retry_op(op=lambda: find_element(
+            el = retry_op(fn=lambda: find_element(
                 driver=ctx.driver,
                 selector=selector,
                 selector_type=selector_type,

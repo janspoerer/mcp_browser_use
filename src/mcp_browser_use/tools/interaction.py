@@ -31,7 +31,7 @@ async def fill_text(
     ctx = get_context()
 
     try:
-        el = retry_op(op=lambda: find_element(
+        el = retry_op(fn=lambda: find_element(
             driver=ctx.driver,
             selector=selector,
             selector_type=selector_type,
@@ -81,7 +81,7 @@ async def click_element(
     ctx = get_context()
 
     try:
-        el = retry_op(op=lambda: find_element(
+        el = retry_op(fn=lambda: find_element(
             driver=ctx.driver,
             selector=selector,
             selector_type=selector_type,
@@ -102,7 +102,7 @@ async def click_element(
             try:
                 el.click()
             except (ElementClickInterceptedException, StaleElementReferenceException):
-                el = retry_op(op=lambda: find_element(
+                el = retry_op(fn=lambda: find_element(
                     driver=ctx.driver,
                     selector=selector,
                     selector_type=selector_type,
@@ -212,7 +212,7 @@ async def send_keys(
 
         if selector:
             # Send keys to specific element
-            el = retry_op(op=lambda: find_element(
+            el = retry_op(fn=lambda: find_element(
                 driver=ctx.driver,
                 selector=selector,
                 selector_type=selector_type,

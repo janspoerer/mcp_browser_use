@@ -20,6 +20,7 @@ async def extract_elements(
     wait_for_visible: bool = False,
     timeout: int = 10,
     max_items: Optional[int] = None,
+    offset: Optional[int] = None,
     discover_containers: bool = False,
     wait_for_content_loaded: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -67,6 +68,8 @@ async def extract_elements(
         max_items: [MODE 2] Limit number of containers to extract (None = all).
                   Useful for testing selectors and preventing token explosions.
                   Recommended: 10 for testing, 50-100 for production.
+        offset: [MODE 2] Skip first N containers before extracting (default: None = no skip).
+               Useful for pagination. Example: offset=10, max_items=10 gets items 11-20.
         discover_containers: [MODE 2] If True, returns container analysis instead of extraction.
                             Use this to explore page structure and find correct selectors.
                             Fast (~5s) and lightweight (~1K tokens).
@@ -145,6 +148,7 @@ async def extract_elements(
                 wait_for_visible=wait_for_visible,
                 timeout=timeout,
                 max_items=max_items,
+                offset=offset,
                 wait_for_content_loaded=wait_for_content_loaded
             )
             snapshot = _make_page_snapshot()
@@ -366,6 +370,7 @@ async def _extract_structured(
     wait_for_visible: bool = False,
     timeout: int = 10,
     max_items: Optional[int] = None,
+    offset: Optional[int] = None,
     wait_for_content_loaded: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -381,6 +386,7 @@ async def _extract_structured(
         wait_for_visible: Wait for containers to be visible
         timeout: Timeout in seconds for finding containers
         max_items: Optional maximum number of containers to extract
+        offset: Optional number of containers to skip before extracting
         wait_for_content_loaded: Optional config for smart waiting on lazy-loaded content.
                                 Dict with keys:
                                 - selector: CSS/XPath to check for loaded content
@@ -426,13 +432,20 @@ async def _extract_structured(
         all_containers = ctx.driver.find_elements(by_type, container_selector)
         total_count = len(all_containers)
 
+        # Apply offset if specified
+        offset_val = offset if offset is not None else 0
+        containers_after_offset = all_containers
+        if offset_val > 0:
+            containers_after_offset = all_containers[offset_val:]
+
         # Apply max_items limit if specified
+        limited = False
         if max_items is not None and max_items > 0:
-            containers = all_containers[:max_items]
+            containers = containers_after_offset[:max_items]
             limited = True
         else:
-            containers = all_containers
-            limited = False
+            containers = containers_after_offset
+            limited = (offset_val > 0) or (len(all_containers) > len(containers))
 
         # Wait for lazy-loaded content if configured
         wait_metadata = None
@@ -446,7 +459,8 @@ async def _extract_structured(
         # Extract fields from each container
         for idx, container in enumerate(containers):
             item = {}
-            item["_container_index"] = idx
+            # _container_index reflects the actual position in the original full list
+            item["_container_index"] = offset_val + idx
 
             for field_spec in fields:
                 field_name = field_spec.get("field_name", f"field_{idx}")
@@ -458,10 +472,18 @@ async def _extract_structured(
         # Add metadata notes
         metadata_entry = {}
 
-        # Add limit metadata if results were limited
-        if limited and total_count > len(containers):
-            metadata_entry["_note"] = f"Results limited to first {max_items} items. Total containers available: {total_count}"
-            metadata_entry["_limited"] = True
+        # Add limit metadata if results were limited or offset was used
+        if limited or offset_val > 0:
+            note_parts = []
+            if offset_val > 0:
+                note_parts.append(f"Offset: {offset_val}")
+            if max_items is not None and max_items > 0:
+                note_parts.append(f"Max items: {max_items}")
+            note_parts.append(f"Extracted: {len(containers)}, Total available: {total_count}")
+
+            metadata_entry["_note"] = ". ".join(note_parts)
+            metadata_entry["_limited"] = limited
+            metadata_entry["_offset"] = offset_val
             metadata_entry["_extracted_count"] = len(containers)
             metadata_entry["_total_count"] = total_count
 

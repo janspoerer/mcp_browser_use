@@ -12,6 +12,7 @@ async def extract_elements(
     wait_for_visible: bool = False,
     timeout: int = 10,
     max_items: Optional[int] = None,
+    offset: Optional[int] = None,
     discover_containers: bool = False,
     wait_for_content_loaded: Optional[Dict[str, any]] = None,
 ) -> str:
@@ -33,6 +34,7 @@ async def extract_elements(
         wait_for_visible: [MODE 2] Wait for containers to be visible
         timeout: [MODE 2] Timeout in seconds
         max_items: [MODE 2] Limit number of containers to extract
+        offset: [MODE 2] Skip first N containers before extracting (useful for pagination)
         discover_containers: [MODE 2] Return container analysis instead of extraction
         wait_for_content_loaded: [MODE 2] Smart wait config for lazy-loaded content
 
@@ -47,6 +49,7 @@ async def extract_elements(
         wait_for_visible=wait_for_visible,
         timeout=timeout,
         max_items=max_items,
+        offset=offset,
         discover_containers=discover_containers,
         wait_for_content_loaded=wait_for_content_loaded
     )

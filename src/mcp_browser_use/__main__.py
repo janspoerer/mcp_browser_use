@@ -884,6 +884,8 @@ async def mcp_browser_use__force_close_all_chrome() -> str:
 
     Simply do not use this! It is very bad!
 
+    All other agents working with this MCP will be affected by this action.
+
     Use this to recover from stuck Chrome instances or when normal close_browser fails.
     This will:
     - Quit the Selenium driver

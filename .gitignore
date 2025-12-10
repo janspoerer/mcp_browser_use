@@ -200,4 +200,5 @@ cython_debug/
 
 # MCP browser lock files and temporary data
 tmp/
-logs/
+logs/*
+!logs/.gitkeep

@@ -42,6 +42,9 @@ def build_chrome_command(
     headless = os.getenv("MCP_HEADLESS", "0").strip()
     is_headless = headless in ("1", "true", "True", "yes", "Yes")
 
+    # Custom user-agent override (e.g., to appear as Windows client)
+    custom_user_agent = os.getenv("MCP_USER_AGENT", "").strip()
+
     cmd = [
         binary,
         f"--remote-debugging-port={port}",
@@ -56,6 +59,10 @@ def build_chrome_command(
         "--disable-software-rasterizer",
         "about:blank",
     ]
+
+    if custom_user_agent:
+        cmd.insert(-1, f"--user-agent={custom_user_agent}")
+        logger.info(f"Custom user-agent set: {custom_user_agent}")
 
     if is_headless:
         cmd.append("--headless=new")

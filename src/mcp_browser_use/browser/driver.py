@@ -273,6 +273,18 @@ def create_webdriver(debugger_host: str, debugger_port: int, config: dict) -> we
         service = ChromeService(log_path=log_file)    # older Selenium
 
     driver = webdriver.Chrome(service=service, options=options)
+
+    # Apply user-agent override via CDP (works for both launched and attached Chrome)
+    custom_user_agent = os.getenv("MCP_USER_AGENT", "").strip()
+    if custom_user_agent:
+        try:
+            driver.execute_cdp_cmd("Network.setUserAgentOverride", {
+                "userAgent": custom_user_agent,
+            })
+            logger.info(f"CDP user-agent override applied: {custom_user_agent}")
+        except Exception as e:
+            logger.warning(f"Failed to apply CDP user-agent override: {e}")
+
     return driver
 
 

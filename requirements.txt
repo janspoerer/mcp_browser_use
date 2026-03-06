@@ -3,6 +3,7 @@ anyio
 attrs
 beautifulsoup4
 certifi
+chromedriver-autoinstaller
 click
 h11
 httpcore

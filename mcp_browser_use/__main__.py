@@ -168,6 +168,11 @@ async def start_browser(
     chrome_options.add_argument("--disable-popup-blocking")
     chrome_options.add_argument("--no-first-run")
 
+    # Linux-specific options for headless/server environments
+    if platform.system() != "Windows":
+        chrome_options.add_argument("--no-zygote")
+        chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
 
@@ -203,6 +208,14 @@ async def start_browser(
         browser_temp_dirs[session_id] = temp_dir
         logging.info(f"Using temporary profile at {temp_dir}")
 
+        # On Linux, prefer Playwright's Chrome binary over snap Chromium
+        if platform.system() != "Windows":
+            import glob
+            pw_chrome = glob.glob(os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome"))
+            if pw_chrome:
+                chrome_options.binary_location = sorted(pw_chrome)[-1]
+                logging.info(f"Using Playwright Chrome binary: {chrome_options.binary_location}")
+
     driver = None
     try:
         if use_custom_profile:
@@ -212,11 +225,9 @@ async def start_browser(
                 is_headless=headless,
             )
         else:
-            from webdriver_manager.chrome import ChromeDriverManager
-            service = ChromeService(
-                executable_path=ChromeDriverManager().install(),
-                log_path=log_path
-            )
+            import chromedriver_autoinstaller
+            chromedriver_autoinstaller.install()
+            service = ChromeService(log_path=log_path)
             driver = webdriver.Chrome(service=service, options=chrome_options)
 
         logging.info(f"Chrome launched successfully. Session: {session_id}")

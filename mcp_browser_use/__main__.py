@@ -276,7 +276,8 @@ async def get_browser_versions() -> str:
 
 @mcp.tool()
 async def navigate(session_id: str, url: str) -> str:
-    """Navigate to a URL.
+    """Navigate to a URL. Returns only the page title (not the full HTML).
+    Use execute_js() to extract specific data from the page after navigating.
 
     Args:
         session_id: Session ID of the browser
@@ -291,11 +292,42 @@ async def navigate(session_id: str, url: str) -> str:
         driver.get(url)
         time.sleep(2)  # Allow page to load
 
-        clean_html = get_cleaned_html(driver)
-
-        return f"Navigated to {url}\nTitle: {driver.title}\nHTML: {clean_html}"
+        return f"Navigated to {url}\nTitle: {driver.title}"
     except Exception as e:
         return f"Error navigating to {url}: {traceback.format_exc()}"
+
+
+@mcp.tool()
+async def execute_js(session_id: str, script: str) -> str:
+    """Execute JavaScript in the browser and return the result.
+
+    Use this to extract structured data from the current page.
+    The script should return a value (use 'return ...' in the script).
+
+    Example: Extract all product names:
+        script: "return Array.from(document.querySelectorAll('.product-name')).map(el => el.textContent.trim())"
+
+    Args:
+        session_id: Session ID of the browser
+        script: JavaScript code to execute. Must use 'return' to return data.
+    """
+    if session_id not in browser_sessions:
+        return f"Session {session_id} not found. Please start a new browser session."
+
+    driver = browser_sessions[session_id]
+
+    try:
+        result = driver.execute_script(script)
+        if result is None:
+            return "Script executed successfully (returned null/undefined)."
+        import json as _json
+        try:
+            return _json.dumps(result, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            return str(result)
+    except Exception as e:
+        return f"Error executing script: {traceback.format_exc()}"
+
 
 @mcp.tool()
 async def click_element(session_id: str, selector: str, selector_type: str = "css", timeout: int = 10, force_js: bool = False) -> str:

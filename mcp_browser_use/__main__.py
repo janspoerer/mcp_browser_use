@@ -147,89 +147,91 @@ async def start_browser(
     is_persistent_browser_session: bool = False
 ) -> str:
     """
-    Start Chrome with WSL2-specific configurations and without user-data-dir
+    Start a Chrome/Chromium browser session for automation.
+
+    On Windows, loads a custom profile from C:\\SeleniumProfiles\\SeleniumProfile if it exists.
+    On Linux/macOS, uses a fresh temporary profile.
+
+    Args:
+        headless: Whether to run the browser in headless mode
+        is_persistent_browser_session: Whether to use a persistent browser session
     """
     logging.info("Starting Chrome browser...")
     session_id = str(uuid.uuid4())
     chrome_options = Options()
 
-    # Basic options without user-data-dir
+    # Common options for all platforms
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-popup-blocking")
-
-    # WSL2-specific options
-    chrome_options.add_argument("--disable-features=VizDisplayCompositor")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--no-zygote")
     chrome_options.add_argument("--no-first-run")
 
-    # Use temporary preferences instead of user-data-dir
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
+
+    download_dir = tempfile.gettempdir()
     chrome_options.add_experimental_option("prefs", {
         "profile.default_content_settings.popups": 0,
-        "download.default_directory": "/tmp",
+        "download.default_directory": download_dir,
         "download.prompt_for_download": False
     })
 
     if headless:
         chrome_options.add_argument("--headless=new")
 
-
     # Create a unique log path
     log_path = os.path.join(tempfile.gettempdir(), f"chromedriver_{session_id}.log")
-    service = ChromeService(log_path=log_path)
 
+    # Platform-specific profile handling
+    use_custom_profile = False
+    custom_user_data_directory = None
 
-    custom_user_data_directory = r"C:\SeleniumProfiles\SeleniumProfile"
-    # Ensure the custom directory exists (already did this, but good check)
-    if not os.path.exists(custom_user_data_directory):
-        print(f"Error: Custom profile directory not found at {custom_user_data_directory}")
-        print("Please create this directory and copy your Default profile into it.")
-        exit() # Exit if the directory doesn't exist
+    if platform.system() == "Windows":
+        custom_user_data_directory = r"C:\SeleniumProfiles\SeleniumProfile"
+        if os.path.exists(custom_user_data_directory):
+            use_custom_profile = True
+            logging.info(f"Windows: Using custom profile at {custom_user_data_directory}")
+        else:
+            logging.info("Windows: Custom profile not found, using temporary profile")
 
+    if not use_custom_profile:
+        # Linux/macOS or Windows without custom profile: use a temp directory
+        temp_dir = tempfile.mkdtemp(prefix="selenium_profile_")
+        chrome_options.add_argument(f"--user-data-dir={temp_dir}")
+        browser_temp_dirs[session_id] = temp_dir
+        logging.info(f"Using temporary profile at {temp_dir}")
 
     driver = None
     try:
-        # *** Launch using the custom data directory and targeting the COPIED 'Default' profile ***
-        driver = ChromeCustomProfileLoader.launch_with_custom_profile(
-            # service=service,
-            custom_data_dir=custom_user_data_directory,
-            profile_folder="Default", # Point to the Default profile you copied into the custom dir
-            is_headless=headless,
-        )
+        if use_custom_profile:
+            driver = ChromeCustomProfileLoader.launch_with_custom_profile(
+                custom_data_dir=custom_user_data_directory,
+                profile_folder="Default",
+                is_headless=headless,
+            )
+        else:
+            from webdriver_manager.chrome import ChromeDriverManager
+            service = ChromeService(
+                executable_path=ChromeDriverManager().install(),
+                log_path=log_path
+            )
+            driver = webdriver.Chrome(service=service, options=chrome_options)
 
-        print("Chrome is there.")
-        # Initial page might be affected by the copied profile/extensions
-        print("Loaded profile, current title:", driver.title)
-
-        # *** Add a wait here, essential as the VPN extension is now in the profile ***
-        print("Navigating to blank page and waiting for extensions to load...")
-        driver.get("about:blank") # Navigate to a neutral page
-        time.sleep(1) # <<< Increase this wait time if the VPN needs longer to connect
-
-        print("Wait finished. Extensions should be loaded. Check if VPN is active/logged in.")
-
-        # *** Your scraping logic starts here ***
-        print("\n--- Starting Scraping Logic ---")
-        # Example: Navigate to the actual website you want to scrape
-        driver.get("https://www.whatsmyip.org/") # Good test to see if VPN is active
-        print("Navigated to IP check site. Title:", driver.title)
-
+        logging.info(f"Chrome launched successfully. Session: {session_id}")
+        driver.get("about:blank")
+        time.sleep(1)
 
     except (SessionNotCreatedException, WebDriverException) as e:
-        print(f"\n!!! Selenium Exception occurred: {type(e).__name__}: {e} !!!")
-        print("The browser likely crashed on startup.")
-        print("Make sure all chrome.exe and chromedriver.exe processes are ended in Task Manager before retrying.")
-        print(f"Ensure you copied the 'Default' profile folder correctly to {custom_user_data_directory}.")
-        print("Increase the initial wait time if the VPN extension is the issue.")
+        logging.error(f"Selenium Exception: {type(e).__name__}: {e}")
+        return f"Error starting browser: {e}"
     except Exception as e:
-        print(f"\n!!! An unexpected error occurred: {e} !!!")
+        logging.error(f"Unexpected error: {e}")
+        return f"Error starting browser: {e}"
 
     browser_sessions[session_id] = driver
+    browser_log_paths[session_id] = log_path
 
     return f"Session {session_id} started successfully.\nHeadless: {headless}\nLog path: {log_path}"
 

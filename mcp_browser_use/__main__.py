@@ -208,13 +208,18 @@ async def start_browser(
         browser_temp_dirs[session_id] = temp_dir
         logging.info(f"Using temporary profile at {temp_dir}")
 
-        # On Linux, prefer Playwright's Chrome binary over snap Chromium
+        # On Linux, prefer env var CHROME_BINARY, then Playwright's Chrome, over snap Chromium
         if platform.system() != "Windows":
-            import glob
-            pw_chrome = glob.glob(os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome"))
-            if pw_chrome:
-                chrome_options.binary_location = sorted(pw_chrome)[-1]
-                logging.info(f"Using Playwright Chrome binary: {chrome_options.binary_location}")
+            chrome_binary = os.environ.get("CHROME_BINARY")
+            if chrome_binary:
+                chrome_options.binary_location = chrome_binary
+                logging.info(f"Using CHROME_BINARY env var: {chrome_binary}")
+            else:
+                import glob
+                pw_chrome = glob.glob(os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome"))
+                if pw_chrome:
+                    chrome_options.binary_location = sorted(pw_chrome)[-1]
+                    logging.info(f"Using Playwright Chrome binary: {chrome_options.binary_location}")
 
     driver = None
     try:
@@ -225,9 +230,14 @@ async def start_browser(
                 is_headless=headless,
             )
         else:
-            import chromedriver_autoinstaller
-            chromedriver_autoinstaller.install()
-            service = ChromeService(log_path=log_path)
+            chromedriver_path = os.environ.get("CHROMEDRIVER_PATH")
+            if chromedriver_path:
+                logging.info(f"Using CHROMEDRIVER_PATH env var: {chromedriver_path}")
+                service = ChromeService(executable_path=chromedriver_path, log_path=log_path)
+            else:
+                import chromedriver_autoinstaller
+                chromedriver_autoinstaller.install()
+                service = ChromeService(log_path=log_path)
             driver = webdriver.Chrome(service=service, options=chrome_options)
 
         logging.info(f"Chrome launched successfully. Session: {session_id}")

@@ -215,8 +215,8 @@ async def start_browser(
                 chrome_options.binary_location = chrome_binary
                 logging.info(f"Using CHROME_BINARY env var: {chrome_binary}")
             else:
-                import glob
-                pw_chrome = glob.glob(os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome"))
+                import glob as _glob
+                pw_chrome = _glob.glob(os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome"))
                 if pw_chrome:
                     chrome_options.binary_location = sorted(pw_chrome)[-1]
                     logging.info(f"Using Playwright Chrome binary: {chrome_options.binary_location}")
@@ -236,8 +236,25 @@ async def start_browser(
                 service = ChromeService(executable_path=chromedriver_path, log_path=log_path)
             else:
                 import chromedriver_autoinstaller
-                chromedriver_autoinstaller.install()
-                service = ChromeService(log_path=log_path)
+                # If a custom binary is set, detect its version for chromedriver matching
+                if chrome_options.binary_location:
+                    import subprocess as _sp
+                    try:
+                        ver_out = _sp.check_output([chrome_options.binary_location, "--version"], text=True).strip()
+                        # e.g. "Google Chrome for Testing 145.0.7632.6" -> "145"
+                        major = ver_out.split()[-1].split(".")[0]
+                        pkg_dir = os.path.dirname(chromedriver_autoinstaller.__file__)
+                        local_cd = os.path.join(pkg_dir, major, "chromedriver")
+                        if os.path.isfile(local_cd):
+                            chromedriver_path = local_cd
+                            logging.info(f"Using chromedriver v{major} to match binary: {chromedriver_path}")
+                    except Exception as e:
+                        logging.warning(f"Could not detect binary version: {e}")
+                if chromedriver_path:
+                    service = ChromeService(executable_path=chromedriver_path, log_path=log_path)
+                else:
+                    chromedriver_autoinstaller.install()
+                    service = ChromeService(log_path=log_path)
             driver = webdriver.Chrome(service=service, options=chrome_options)
 
         logging.info(f"Chrome launched successfully. Session: {session_id}")

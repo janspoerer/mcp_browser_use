@@ -73,7 +73,7 @@ def mock_driver():
 def session_with_driver(mock_driver):
     """Register a mock driver in browser_sessions and return session_id."""
     sid = "test-session-123"
-    browser_sessions[sid] = mock_driver
+    browser_sessions[sid] = {'engine': 'undetected-chromedriver', 'driver': mock_driver}
     return sid
 
 

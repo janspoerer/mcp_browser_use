@@ -96,6 +96,39 @@ From server: mcp_browser_use
 ```
 
 
+## Browser Engines
+
+The `start_browser` tool supports three browser engines via the `driver` parameter:
+
+| Engine | Description | Best For |
+|--------|-------------|----------|
+| `undetected-chromedriver` (default) | Chrome via patched Selenium driver | General-purpose stealth automation |
+| `nodriver` | Chrome via direct CDP, no Selenium/WebDriver layer | Sites with aggressive bot detection |
+| `camoufox` | **Firefox-based** with C++-level fingerprint spoofing (Playwright API internally) | **Cloudflare bypass, Turnstile challenges** |
+
+### When to Use Camoufox
+
+Use `driver="camoufox"` when:
+- The site uses **Cloudflare** protection (Turnstile, JS challenges, "Just a moment..." pages)
+- Other engines get blocked or return bot-detection pages
+- You need Firefox fingerprinting instead of Chrome
+
+Example:
+```python
+# Start a camoufox session for Cloudflare-protected sites
+start_browser(driver="camoufox", headless=False, locale="de-DE")
+```
+
+**Note:** On Linux, always use `headless=False` and run inside Xvfb (virtual display). Camoufox with `headless=True` may not solve Cloudflare Turnstile interactive checkboxes — those require a real visible window for the user to click.
+
+### Installation
+
+Camoufox requires an additional binary download after `pip install camoufox`:
+
+```bash
+python -m camoufox fetch
+```
+
 ## Demo Video (YouTube)
 
 [![Quick demo](https://img.youtube.com/vi/20B8trurlsI/hqdefault.jpg)](https://www.youtube.com/watch?v=20B8trurlsI)

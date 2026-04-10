@@ -96,6 +96,103 @@ From server: mcp_browser_use
 ```
 
 
+## Installation & Setup
+
+### 1. Clone and create a virtual environment
+
+```bash
+git clone https://github.com/hd24-dev/mcp_browser_use.git
+cd mcp_browser_use
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+---
+
+### 2. Chrome setup (for `undetected-chromedriver` and `nodriver`)
+
+Both Chrome-based engines require **Google Chrome** to be installed on your system. ChromeDriver is managed automatically by `chromedriver-autoinstaller` — you do not need to download it manually.
+
+**macOS:**
+```bash
+# Install via Homebrew
+brew install --cask google-chrome
+```
+
+**Ubuntu / Debian:**
+```bash
+wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" \
+    | sudo tee /etc/apt/sources.list.d/google-chrome.list
+sudo apt update && sudo apt install -y google-chrome-stable
+```
+
+**Windows:** Download and install Chrome from [google.com/chrome](https://www.google.com/chrome/).
+
+After installing Chrome, verify the setup:
+```bash
+google-chrome --version      # Linux
+# or
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version  # macOS
+```
+
+ChromeDriver will be downloaded automatically the first time a browser session starts.
+
+#### Linux headless servers — Xvfb (virtual display)
+
+Chrome-based engines need a display. On headless Linux servers (no GUI), use **Xvfb**:
+
+```bash
+sudo apt install -y xvfb
+
+# Start a virtual display on screen :99
+Xvfb :99 -screen 0 1920x1080x24 &
+
+# Tell Chrome which display to use
+export DISPLAY=:99
+```
+
+To make the display permanent across reboots, add it as a systemd service or run it in a `screen`/`tmux` session. The `export DISPLAY=:99` line should be in the same shell environment (or `.bashrc` / `.profile`) that launches the MCP server.
+
+---
+
+### 3. Camoufox setup
+
+Camoufox is a **Firefox-based** browser with C++-level fingerprint spoofing. It requires a separate binary download on top of the Python package.
+
+**Step 1 — install the Python package:**
+```bash
+pip install camoufox[geoip]
+```
+
+The `[geoip]` extra enables IP-based geolocation spoofing (recommended for Cloudflare bypass).
+
+**Step 2 — download the Camoufox browser binary:**
+```bash
+python -m camoufox fetch
+```
+
+This downloads the patched Firefox binary (~100 MB) into the Python package's data directory. It only needs to be run once per environment.
+
+**Verify the install:**
+```bash
+python -c "from camoufox.sync_api import Camoufox; print('Camoufox OK')"
+```
+
+#### Camoufox on Linux headless servers
+
+Camoufox also needs a display on Linux. The same Xvfb setup described above works:
+
+```bash
+Xvfb :99 -screen 0 1920x1080x24 &
+export DISPLAY=:99
+```
+
+Always use `headless=False` with Camoufox when targeting Cloudflare-protected sites — Cloudflare Turnstile interactive checkboxes require a real visible window.
+
+---
+
 ## Browser Engines
 
 The `start_browser` tool supports three browser engines via the `driver` parameter:
@@ -106,28 +203,37 @@ The `start_browser` tool supports three browser engines via the `driver` paramet
 | `nodriver` | Chrome via direct CDP, no Selenium/WebDriver layer | Sites with aggressive bot detection |
 | `camoufox` | **Firefox-based** with C++-level fingerprint spoofing (Playwright API internally) | **Cloudflare bypass, Turnstile challenges** |
 
-### When to Use Camoufox
+### Choosing an engine
+
+| Situation | Recommended engine |
+|---|---|
+| Default / most sites | `undetected-chromedriver` |
+| Site blocks ChromeDriver | `nodriver` |
+| Cloudflare / Turnstile challenge | `camoufox` |
+
+### Parameters
+
+`start_browser(driver, headless, locale)`
+
+| Parameter | Default | Description |
+|---|---|---|
+| `driver` | `"undetected-chromedriver"` | Engine to use (see table above) |
+| `headless` | `False` | Run without a visible window. Prefer `False` on all platforms and use Xvfb on Linux instead |
+| `locale` | `"en-US"` | Browser locale, e.g. `"de-DE"`, `"fr-FR"` |
+
+### When to use Camoufox
 
 Use `driver="camoufox"` when:
 - The site uses **Cloudflare** protection (Turnstile, JS challenges, "Just a moment..." pages)
 - Other engines get blocked or return bot-detection pages
 - You need Firefox fingerprinting instead of Chrome
 
-Example:
 ```python
 # Start a camoufox session for Cloudflare-protected sites
 start_browser(driver="camoufox", headless=False, locale="de-DE")
 ```
 
 **Note:** On Linux, always use `headless=False` and run inside Xvfb (virtual display). Camoufox with `headless=True` may not solve Cloudflare Turnstile interactive checkboxes — those require a real visible window for the user to click.
-
-### Installation
-
-Camoufox requires an additional binary download after `pip install camoufox`:
-
-```bash
-python -m camoufox fetch
-```
 
 ## Demo Video (YouTube)
 

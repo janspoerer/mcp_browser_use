@@ -32,7 +32,7 @@ async def start(
 
     cf = AsyncCamoufox(
         headless=headless,
-        geoip=True,
+        geoip=False,
         os=os_list,
         locale=locale,
     )

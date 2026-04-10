@@ -265,6 +265,9 @@ from mcp_browser_use.helpers_context import to_context_pack as _to_context_pack
 
 # Import tools directly (not via helpers) to break circular dependency
 from mcp_browser_use.tools import browser_management, navigation, interaction, screenshots, debugging, extraction
+
+# Camoufox engine (Firefox-based anti-bot browser)
+from mcp_browser_use.camoufox import engine as camoufox_engine
 #endregion
 
 #region Logger
@@ -1334,6 +1337,199 @@ async def mcp_browser_use__extract_elements(
         text_offset=text_offset,
         html_offset=html_offset
     )
+#endregion
+
+#region Tools -- Camoufox (Firefox-based anti-bot engine)
+import json as _json
+
+@mcp.tool()
+async def mcp_browser_use__camoufox_start(
+    locale: str = "de-DE",
+    os_hint: str = "windows",
+    headless: bool = False,
+) -> str:
+    """
+    Start a Camoufox browser session (Firefox-based, C++-level fingerprint spoofing).
+
+    Use this instead of start_browser when the target site uses Cloudflare protection,
+    Turnstile challenges, or blocks Chrome-based browsers.
+
+    Args:
+        locale: Browser locale, e.g. "de-DE", "en-US".
+        os_hint: OS fingerprint to spoof. One of "windows", "macos", "linux".
+                 Use "windows" for Windows 10/11 fingerprint.
+        headless: Run without a visible window. Keep False on Linux and use Xvfb instead.
+
+    Returns:
+        session_id string -- pass this to all other camoufox_* tools.
+    """
+    os_map = {"windows": ["windows"], "macos": ["macos"], "linux": ["linux"]}
+    os_list = os_map.get(os_hint.lower(), ["windows"])
+    try:
+        session_id = await camoufox_engine.start(headless=headless, locale=locale, os_hint=os_list)
+        return _json.dumps({"ok": True, "session_id": session_id, "engine": "camoufox", "os": os_hint, "locale": locale})
+    except Exception as e:
+        return _json.dumps({"ok": False, "error": str(e)})
+
+
+@mcp.tool()
+async def mcp_browser_use__camoufox_navigate(
+    session_id: str,
+    url: str,
+) -> str:
+    """
+    Navigate to a URL in a Camoufox browser session.
+
+    Args:
+        session_id: Session ID returned by camoufox_start.
+        url: URL to navigate to.
+
+    Returns:
+        JSON with url, title, http status.
+    """
+    try:
+        result = await camoufox_engine.navigate(session_id, url)
+        return _json.dumps({"ok": True, **result})
+    except Exception as e:
+        return _json.dumps({"ok": False, "error": str(e)})
+
+
+@mcp.tool()
+async def mcp_browser_use__camoufox_screenshot(
+    session_id: str,
+) -> str:
+    """
+    Take a screenshot of the current Camoufox browser page.
+
+    Args:
+        session_id: Session ID returned by camoufox_start.
+
+    Returns:
+        JSON with base64-encoded PNG screenshot.
+    """
+    try:
+        b64 = await camoufox_engine.screenshot(session_id)
+        return _json.dumps({"ok": True, "screenshot_base64": b64})
+    except Exception as e:
+        return _json.dumps({"ok": False, "error": str(e)})
+
+
+@mcp.tool()
+async def mcp_browser_use__camoufox_get_html(
+    session_id: str,
+    clean: bool = True,
+) -> str:
+    """
+    Get the HTML content of the current Camoufox browser page.
+
+    Args:
+        session_id: Session ID returned by camoufox_start.
+        clean: Strip script/style/meta tags from HTML (default True).
+
+    Returns:
+        JSON with html field containing page HTML.
+    """
+    try:
+        html = await camoufox_engine.get_html(session_id, clean=clean)
+        return _json.dumps({"ok": True, "html": html})
+    except Exception as e:
+        return _json.dumps({"ok": False, "error": str(e)})
+
+
+@mcp.tool()
+async def mcp_browser_use__camoufox_click(
+    session_id: str,
+    selector: str,
+    selector_type: str = "css",
+) -> str:
+    """
+    Click an element in the Camoufox browser.
+
+    Args:
+        session_id: Session ID returned by camoufox_start.
+        selector: CSS selector or XPath expression.
+        selector_type: "css" (default) or "xpath".
+
+    Returns:
+        JSON with resulting url and title after click.
+    """
+    try:
+        result = await camoufox_engine.click(session_id, selector, selector_type)
+        return _json.dumps({"ok": True, **result})
+    except Exception as e:
+        return _json.dumps({"ok": False, "error": str(e)})
+
+
+@mcp.tool()
+async def mcp_browser_use__camoufox_fill_text(
+    session_id: str,
+    selector: str,
+    text: str,
+    selector_type: str = "css",
+) -> str:
+    """
+    Fill a text input in the Camoufox browser.
+
+    Args:
+        session_id: Session ID returned by camoufox_start.
+        selector: CSS selector or XPath expression targeting the input.
+        text: Text to enter.
+        selector_type: "css" (default) or "xpath".
+
+    Returns:
+        JSON with resulting url and title.
+    """
+    try:
+        result = await camoufox_engine.fill_text(session_id, selector, text, selector_type)
+        return _json.dumps({"ok": True, **result})
+    except Exception as e:
+        return _json.dumps({"ok": False, "error": str(e)})
+
+
+@mcp.tool()
+async def mcp_browser_use__camoufox_wait_for_element(
+    session_id: str,
+    selector: str,
+    timeout: int = 10,
+    selector_type: str = "css",
+) -> str:
+    """
+    Wait for an element to become visible in the Camoufox browser.
+
+    Args:
+        session_id: Session ID returned by camoufox_start.
+        selector: CSS selector or XPath expression.
+        timeout: Timeout in seconds (default 10).
+        selector_type: "css" (default) or "xpath".
+
+    Returns:
+        JSON with found=True if element appeared within timeout.
+    """
+    try:
+        result = await camoufox_engine.wait_for_element(session_id, selector, timeout, selector_type)
+        return _json.dumps({"ok": True, **result})
+    except Exception as e:
+        return _json.dumps({"ok": False, "error": str(e)})
+
+
+@mcp.tool()
+async def mcp_browser_use__camoufox_close(
+    session_id: str,
+) -> str:
+    """
+    Close a Camoufox browser session.
+
+    Args:
+        session_id: Session ID returned by camoufox_start.
+
+    Returns:
+        JSON confirming closure.
+    """
+    try:
+        await camoufox_engine.close(session_id)
+        return _json.dumps({"ok": True, "closed": session_id})
+    except Exception as e:
+        return _json.dumps({"ok": False, "error": str(e)})
 #endregion
 
 

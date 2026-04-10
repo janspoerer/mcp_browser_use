@@ -1347,6 +1347,7 @@ async def mcp_browser_use__camoufox_start(
     locale: str = "de-DE",
     os_hint: str = "windows",
     headless: bool = False,
+    profile_dir: str = "",
 ) -> str:
     """
     Start a Camoufox browser session (Firefox-based, C++-level fingerprint spoofing).
@@ -1359,6 +1360,10 @@ async def mcp_browser_use__camoufox_start(
         os_hint: OS fingerprint to spoof. One of "windows", "macos", "linux".
                  Use "windows" for Windows 10/11 fingerprint.
         headless: Run without a visible window. Keep False on Linux and use Xvfb instead.
+        profile_dir: Optional path to a persistent Firefox profile directory.
+                     When set, cookies and localStorage survive MCP server restarts,
+                     so you stay logged in between sessions.
+                     Example: "/home/user/.camoufox_profiles/mysite"
 
     Returns:
         session_id string -- pass this to all other camoufox_* tools.
@@ -1366,8 +1371,13 @@ async def mcp_browser_use__camoufox_start(
     os_map = {"windows": ["windows"], "macos": ["macos"], "linux": ["linux"]}
     os_list = os_map.get(os_hint.lower(), ["windows"])
     try:
-        session_id = await camoufox_engine.start(headless=headless, locale=locale, os_hint=os_list)
-        return _json.dumps({"ok": True, "session_id": session_id, "engine": "camoufox", "os": os_hint, "locale": locale})
+        session_id = await camoufox_engine.start(
+            headless=headless,
+            locale=locale,
+            os_hint=os_list,
+            profile_dir=profile_dir or None,
+        )
+        return _json.dumps({"ok": True, "session_id": session_id, "engine": "camoufox", "os": os_hint, "locale": locale, "profile_dir": profile_dir or None})
     except Exception as e:
         return _json.dumps({"ok": False, "error": str(e)})
 

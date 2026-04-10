@@ -1,14 +1,14 @@
 """Camoufox (Firefox-based) browser engine for anti-bot scraping."""
 
-import asyncio
 import base64
 import logging
 import uuid
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Global session store: session_id -> {'cf': AsyncCamoufox, 'browser': Browser, 'page': Page}
+# Global session store: session_id -> {'cf': AsyncCamoufox, 'browser': Browser|BrowserContext, 'page': Page}
 _sessions: dict = {}
 
 
@@ -22,25 +22,34 @@ async def start(
     headless: bool = False,
     locale: str = "de-DE",
     os_hint: Optional[list] = None,
+    profile_dir: Optional[str] = None,
 ) -> str:
-    """Start a camoufox browser session. Returns session_id."""
+    """Start a camoufox browser session. Returns session_id.
+
+    If profile_dir is given, a persistent Firefox profile is used so that
+    cookies and localStorage survive MCP server restarts.
+    """
     from camoufox.async_api import AsyncCamoufox
 
     session_id = str(uuid.uuid4())[:8]
-
     os_list = os_hint or ["windows"]
 
-    cf = AsyncCamoufox(
-        headless=headless,
-        geoip=False,
-        os=os_list,
-        locale=locale,
-    )
-    browser = await cf.__aenter__()
-    page = await browser.new_page()
+    kwargs = dict(headless=headless, geoip=False, os=os_list, locale=locale)
 
-    _sessions[session_id] = {"cf": cf, "browser": browser, "page": page}
-    logger.info(f"Camoufox session {session_id} started (os={os_list}, locale={locale}, headless={headless})")
+    if profile_dir:
+        Path(profile_dir).mkdir(parents=True, exist_ok=True)
+        kwargs["persistent_context"] = True
+        kwargs["user_data_dir"] = str(profile_dir)
+
+    cf = AsyncCamoufox(**kwargs)
+    browser_or_ctx = await cf.__aenter__()
+    page = await browser_or_ctx.new_page()
+
+    _sessions[session_id] = {"cf": cf, "browser": browser_or_ctx, "page": page}
+    logger.info(
+        f"Camoufox session {session_id} started "
+        f"(os={os_list}, locale={locale}, headless={headless}, profile={profile_dir!r})"
+    )
     return session_id
 
 
@@ -108,6 +117,14 @@ async def wait_for_element(session_id: str, selector: str, timeout: int = 10, se
         loc = page.locator(selector).first
     await loc.wait_for(state="visible", timeout=timeout * 1000)
     return {"found": True, "selector": selector}
+
+
+async def evaluate_js(session_id: str, script: str) -> any:
+    """Evaluate JavaScript in the current page context. Returns the result."""
+    sess = _get_session(session_id)
+    page = sess["page"]
+    result = await page.evaluate(script)
+    return result
 
 
 async def close(session_id: str) -> None:

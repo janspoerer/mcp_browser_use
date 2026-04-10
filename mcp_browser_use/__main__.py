@@ -717,6 +717,53 @@ async def scroll(session_id: str, x: int = 0, y: int = 500) -> str:
 
 
 # ---------------------------------------------------------------------------
+# click_at_coordinates
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def click_at_coordinates(session_id: str, x: int, y: int) -> str:
+    """Click at specific screen coordinates (pixels from top-left of browser viewport).
+
+    Useful for interacting with elements that are not in the DOM (e.g. canvas, shadow DOM,
+    Cloudflare Turnstile checkbox).
+
+    Args:
+        session_id: Session ID of the browser
+        x: Horizontal pixel coordinate
+        y: Vertical pixel coordinate
+    """
+    try:
+        sess = _sess(session_id)
+    except KeyError as e:
+        return str(e)
+
+    engine = sess['engine']
+    try:
+        if engine == 'camoufox':
+            page = sess['page']
+            await page.mouse.click(x, y)
+            await asyncio.sleep(1)
+            title = await page.title()
+            return f"Clicked at ({x}, {y})\nCurrent URL: {page.url}\nTitle: {title}"
+
+        elif engine == 'undetected-chromedriver':
+            drv = sess['driver']
+            from selenium.webdriver import ActionChains
+            ActionChains(drv).move_by_offset(x, y).click().perform()
+            time.sleep(1)
+            return f"Clicked at ({x}, {y})\nCurrent URL: {drv.current_url}\nTitle: {drv.title}"
+
+        elif engine == 'nodriver':
+            tab = sess['tab']
+            await tab.evaluate(f"document.elementFromPoint({x}, {y})?.click()")
+            await asyncio.sleep(1)
+            return f"Clicked at ({x}, {y})\nCurrent URL: {tab.url}\nTitle: {tab.title}"
+
+    except Exception:
+        return f"Error clicking at ({x}, {y}): {traceback.format_exc()}"
+
+
+# ---------------------------------------------------------------------------
 # take_screenshot
 # ---------------------------------------------------------------------------
 
@@ -769,6 +816,48 @@ async def take_screenshot(session_id: str, screenshot_path: str = None) -> str:
 
     except Exception:
         return f"Error taking screenshot: {traceback.format_exc()}"
+
+
+# ---------------------------------------------------------------------------
+# mouse_click
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def mouse_click(session_id: str, x: float, y: float) -> str:
+    """Click at specific page coordinates (x, y) using the browser's mouse.
+
+    Useful for interacting with elements that cannot be found via CSS/XPath selectors,
+    such as Cloudflare Turnstile checkboxes rendered in isolated frames.
+
+    Args:
+        session_id: Session ID of the browser
+        x: Horizontal coordinate in CSS pixels (relative to the viewport)
+        y: Vertical coordinate in CSS pixels (relative to the viewport)
+    """
+    try:
+        sess = _sess(session_id)
+    except KeyError as e:
+        return str(e)
+
+    engine = sess['engine']
+    try:
+        if engine == 'camoufox':
+            page = sess['page']
+            await page.mouse.click(x, y)
+        elif engine == 'undetected-chromedriver':
+            drv = sess['driver']
+            from selenium.webdriver.common.action_chains import ActionChains
+            actions = ActionChains(drv)
+            actions.move_by_offset(int(x), int(y)).click().perform()
+        elif engine == 'nodriver':
+            tab = sess['tab']
+            await tab.evaluate(f"document.elementFromPoint({x}, {y})?.click()")
+        else:
+            return f"mouse_click not supported for engine '{engine}'"
+
+        return f"Clicked at ({x}, {y})"
+    except Exception:
+        return f"Error clicking at ({x}, {y}): {traceback.format_exc()}"
 
 
 # ---------------------------------------------------------------------------

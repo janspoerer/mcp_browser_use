@@ -31,9 +31,62 @@ _This makes the handling of multiple agents seamless: Just start as many agents 
 
 ## Configuration / Installation
 
-* We recommend using Chrome Canary or Chrome Beta. This will ensure that your AI agents will not interfere with your Chrome instance. While this MCP can handle an arbitrary number of agents to use a single Chrome executable, the MCP does require the instance to be started in developer mode. If you, as a normal human user, start your normal Chrome instance manually, the Chrome instance **won't be in developer mode**. This is a problem. Thus, allow you to use your Chrome browser normally, please just install Chrome Beta (recommended) or Chrome Canary (not recommended due to instability).
-* After installing Chrome Beta, point to the Chrome Beta executable in the `.env` file as described below.
-* Start the MCP server (if you do not know how to do this, check the section "How to Use (This) MCP below).
+### 1. Clone and create a virtual environment
+
+```bash
+git clone https://github.com/janspoerer/mcp_browser_use.git
+cd mcp_browser_use
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 2. Install Chrome Beta
+
+We recommend using Chrome Beta (not your regular Chrome) so AI agents can run with remote debugging without interfering with your day-to-day browsing.
+
+**macOS:**
+```bash
+brew install --cask google-chrome-beta
+```
+
+**Ubuntu / Debian:**
+```bash
+wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" \
+    | sudo tee /etc/apt/sources.list.d/google-chrome.list
+sudo apt update && sudo apt install -y google-chrome-beta
+```
+
+**Windows:** Download and install Chrome Beta from [google.com/chrome/beta](https://www.google.com/chrome/beta/).
+
+After installing, verify:
+```bash
+google-chrome-beta --version      # Linux
+# or
+"/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta" --version  # macOS
+```
+
+#### Linux headless servers — Xvfb (virtual display)
+
+Chrome needs a display. On headless Linux servers (no GUI), use **Xvfb**:
+
+```bash
+sudo apt install -y xvfb
+
+# Start a virtual display on screen :99
+Xvfb :99 -screen 0 1920x1080x24 &
+
+# Tell Chrome which display to use
+export DISPLAY=:99
+```
+
+Add `export DISPLAY=:99` to your `.bashrc` or `.profile` to make it permanent.
+
+### 3. Configure and start
+
+* After installing Chrome Beta, point to the Chrome Beta executable in your `.mcp.json` as described in the Environment Variable Configuration section below.
+* Start the MCP server (if you do not know how to do this, check the section "How to Use (This) MCP" below).
 
 ## How to Use (This) MCP
 

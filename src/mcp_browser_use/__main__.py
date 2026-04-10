@@ -1530,6 +1530,33 @@ async def mcp_browser_use__camoufox_close(
         return _json.dumps({"ok": True, "closed": session_id})
     except Exception as e:
         return _json.dumps({"ok": False, "error": str(e)})
+
+
+async def mcp_browser_use__camoufox_evaluate_js(
+    session_id: str,
+    script: str,
+) -> str:
+    """
+    Evaluate JavaScript in the current Camoufox page context.
+
+    Useful for batch API calls from an authenticated browser session, DOM
+    inspection, or any operation that benefits from running inside the page.
+    The script is executed via Playwright's page.evaluate(), so it must be a
+    valid JS expression or function body that returns a serialisable value.
+
+    Args:
+        session_id: Session ID returned by camoufox_start.
+        script: JavaScript to evaluate (e.g. "document.title" or
+                "fetch('/api/...').then(r=>r.json())").
+
+    Returns:
+        JSON with {"ok": true, "result": <serialised return value>}.
+    """
+    try:
+        result = await camoufox_engine.evaluate_js(session_id, script)
+        return _json.dumps({"ok": True, "result": result})
+    except Exception as e:
+        return _json.dumps({"ok": False, "error": str(e)})
 #endregion
 
 

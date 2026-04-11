@@ -1542,6 +1542,7 @@ async def mcp_browser_use__camoufox_close(
         return _json.dumps({"ok": False, "error": str(e)})
 
 
+@mcp.tool()
 async def mcp_browser_use__camoufox_evaluate_js(
     session_id: str,
     script: str,

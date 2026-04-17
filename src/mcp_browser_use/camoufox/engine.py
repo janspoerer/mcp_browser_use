@@ -41,9 +41,10 @@ async def start(
         kwargs["persistent_context"] = True
         kwargs["user_data_dir"] = str(profile_dir)
 
+    import asyncio
     cf = AsyncCamoufox(**kwargs)
-    browser_or_ctx = await cf.__aenter__()
-    page = await browser_or_ctx.new_page()
+    browser_or_ctx = await asyncio.wait_for(cf.__aenter__(), timeout=30)
+    page = await asyncio.wait_for(browser_or_ctx.new_page(), timeout=10)
 
     _sessions[session_id] = {"cf": cf, "browser": browser_or_ctx, "page": page}
     logger.info(
@@ -53,10 +54,10 @@ async def start(
     return session_id
 
 
-async def navigate(session_id: str, url: str) -> dict:
+async def navigate(session_id: str, url: str, timeout_sec: int = 15) -> dict:
     sess = _get_session(session_id)
     page = sess["page"]
-    resp = await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    resp = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_sec * 1000)
     title = await page.title()
     return {"url": page.url, "title": title, "status": resp.status if resp else None}
 

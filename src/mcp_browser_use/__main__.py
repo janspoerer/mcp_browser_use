@@ -1386,6 +1386,7 @@ async def mcp_browser_use__camoufox_start(
 async def mcp_browser_use__camoufox_navigate(
     session_id: str,
     url: str,
+    timeout_sec: int = 15,
 ) -> str:
     """
     Navigate to a URL in a Camoufox browser session.
@@ -1393,12 +1394,13 @@ async def mcp_browser_use__camoufox_navigate(
     Args:
         session_id: Session ID returned by camoufox_start.
         url: URL to navigate to.
+        timeout_sec: Navigation timeout in seconds (default 15).
 
     Returns:
         JSON with url, title, http status.
     """
     try:
-        result = await camoufox_engine.navigate(session_id, url)
+        result = await camoufox_engine.navigate(session_id, url, timeout_sec=timeout_sec)
         return _json.dumps({"ok": True, **result})
     except Exception as e:
         return _json.dumps({"ok": False, "error": str(e)})

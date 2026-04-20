@@ -4,7 +4,10 @@ import tempfile
 import os
 import time
 from pathlib import Path
-from mcp_agent.core.fastagent import FastAgent
+try:
+    from mcp_agent.core.fastagent import FastAgent
+except ImportError:
+    FastAgent = None
 from dotenv import load_dotenv
 
 # Add other imports like asyncio, tempfile, etc. below

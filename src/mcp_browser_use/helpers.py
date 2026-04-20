@@ -117,6 +117,16 @@ from .actions.navigation import (
     _wait_document_ready,            # Used by tools
 )
 
+from .actions.elements import (
+    get_by_selector,                 # Used by tests
+    find_element,                    # Used by tests
+)
+
+from .utils.html_utils import (
+    remove_unwanted_tags,            # Used by tests
+    get_cleaned_html,                # Used by tests
+)
+
 from .actions.screenshots import (
     _make_page_snapshot,             # Used by tools
 )

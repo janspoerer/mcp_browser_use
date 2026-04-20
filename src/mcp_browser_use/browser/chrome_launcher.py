@@ -57,6 +57,9 @@ def build_chrome_command(
         "--disable-gpu",
         "--disable-dev-shm-usage",
         "--disable-software-rasterizer",
+        # Memory limits: cap renderer processes and V8 JS heap to prevent OOM
+        "--renderer-process-limit=2",
+        "--js-flags=--max-old-space-size=3072",
         "about:blank",
     ]
 
